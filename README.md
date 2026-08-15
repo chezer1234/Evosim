@@ -1,8 +1,16 @@
 # Evosim
 
-A single-page evolution simulator. Scaffold stage — the simulation itself is still to be designed.
+A single-page evolution simulator. The world generator is in place; the simulation itself is still to be designed.
 
 **Stack:** React + Vite + Tailwind CSS
+
+## World generation
+
+`src/worldgen/` holds the procedural map generator: a seeded Perlin fBm island
+with verified lake carving (`mapgen.js`, framework-agnostic), and the
+Home → Settings → Game screens that drive it. Every "Play" rolls a new
+coastline; Settings controls map size, noise detail/feature size/roughness,
+lake count range, and vegetation density, persisted to `localStorage`.
 
 ## Development
 
@@ -36,4 +44,4 @@ Every push to `main` triggers a new deploy automatically once the service is con
 
 ## Status
 
-Minimal scaffold only — no simulation logic yet.
+World/map generation is done. No creatures, evolution, or simulation logic yet.
