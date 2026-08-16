@@ -1,29 +1,36 @@
-// The fox genome. Unlike a rabbit - whose whole personality is an opaque
-// neural net (see ./brain.js) - a fox is defined by a handful of named,
-// readable dials: speed, vision, camouflage, metabolism, desire to hunt,
-// pack tendency, stamina and fecundity. Issue #11 asked for "parameters that
-// control how bitey it gets", and explicit genes make that legible: you can
-// look at a fox and see *why* it hunts the way it does, and watch those
-// numbers drift across generations in the population panel.
+// The fox's *body*. Its behaviour lives in a neural net now (see
+// ./foxBrain.js) - what this file describes is the animal that net is
+// driving: how fast it moves, how far it sees and smells, how much it burns
+// standing still, how long it can press a chase, and how readily it turns a
+// full belly into cubs.
+//
+// That split matches the rabbits (an opaque net for decisions, an explicit
+// gene vector for senses) and it is the reason the old `bloodlust` gene is
+// gone: "how badly do I want to kill this rabbit" is an opinion, and
+// opinions belong in the net, where they can depend on how hungry the fox
+// is, how far off the rabbit is and whether the pack is with it, instead of
+// being one fixed number per lineage.
 //
 // Every gene is stored 0..1 (the genome's own units) and mapped to real sim
 // units by foxStats(). Children inherit their parent's genes with small
-// gaussian mutations, exactly like rabbit brain weights - same evolutionary
-// loop, different representation.
+// gaussian mutations, exactly like both species' brain weights - same
+// evolutionary loop, different representation.
 
 import { canSwim, describeSwimming, swimDrainFactor, swimSpeedFactor } from './water.js'
 
 /** Display metadata for the genes, in inspector order. `high`/`low` are the
  * plain-English readings the UI and describeFox() use, so the wording lives
- * next to the gene rather than being duplicated per call site. */
+ * next to the gene rather than being duplicated per call site. Both are
+ * *verb phrases* ("covers open ground quickly", not "quick over open
+ * ground"): describeFox strings three of them together, and a mix of verbs
+ * and adjectives there reads as broken English. */
 export const FOX_GENE_META = [
-  { key: 'speed', label: 'Speed', color: 'rgb(251,146,60)', high: 'quick over open ground', low: 'slow, plodding' },
-  { key: 'vision', label: 'Vision', color: 'rgb(250,204,21)', high: 'spots prey from far off', low: 'short-sighted' },
-  { key: 'camouflage', label: 'Camouflage', color: 'rgb(163,163,163)', high: 'creeps up almost unseen', low: 'obvious from a distance' },
-  { key: 'metabolism', label: 'Metabolism', color: 'rgb(248,113,113)', high: 'burns hot, feasts hard', low: 'frugal, lean living' },
-  { key: 'bloodlust', label: 'Desire to hunt', color: 'rgb(220,38,38)', high: 'kills for the sake of it', low: 'only hunts when hungry' },
-  { key: 'packTendency', label: 'Pack tendency', color: 'rgb(167,139,250)', high: 'hunts with the pack', low: 'a loner' },
-  { key: 'stamina', label: 'Stamina', color: 'rgb(56,189,248)', high: 'chases relentlessly', low: 'winded after a short dash' },
+  { key: 'speed', label: 'Speed', color: 'rgb(251,146,60)', high: 'covers open ground quickly', low: 'plods' },
+  { key: 'vision', label: 'Vision & nose', color: 'rgb(250,204,21)', high: 'spots prey from far off and smells it through the trees', low: 'is short-sighted, with no better a nose' },
+  { key: 'camouflage', label: 'Camouflage', color: 'rgb(163,163,163)', high: 'creeps up almost unseen', low: 'is obvious from a distance' },
+  { key: 'metabolism', label: 'Metabolism', color: 'rgb(248,113,113)', high: 'burns hot and feasts hard', low: 'lives lean and frugally' },
+  { key: 'packTendency', label: 'Pack instinct', color: 'rgb(167,139,250)', high: 'keeps track of the whole pack', low: 'notices only what is under its nose' },
+  { key: 'stamina', label: 'Stamina', color: 'rgb(56,189,248)', high: 'chases relentlessly', low: 'is winded after a short dash' },
   { key: 'fecundity', label: 'Fecundity', color: 'rgb(244,114,182)', high: 'breeds readily', low: 'breeds rarely' },
   { key: 'swimming', label: 'Swimming', color: 'rgb(56,189,248)', high: 'follows prey straight into the lake', low: 'will not get its feet wet - water stops it dead' },
 ]
@@ -44,10 +51,17 @@ const FOUNDER_SPREAD = 0.34 // +/- around the gene's founder mean
 // starting prior - mutation is untouched and unbounded within 0..1, so a
 // lineage can still evolve back toward fast legs, a frugal gut or a short
 // gestation if the ecosystem rewards it. Genes not listed start at 0.5.
+//
+// Speed and fecundity were nudged back up when the foxes got brains: a
+// founder pack at speed 0.34 could not run down *any* rabbit that saw it
+// coming, so five founders on a big island reliably starved before their
+// genes could drift anywhere interesting. They still start below the
+// midpoint - a fresh fox is not a match for a running rabbit in a straight
+// line - just not hopeless.
 const FOUNDER_MEAN = {
-  speed: 0.34, // slower off the mark; sprinting has to be evolved for
-  metabolism: 0.54, // burns down faster, so an unfed fox has less runway
-  fecundity: 0.28, // longer gestation and a higher bar to breed at all
+  speed: 0.4, // slower than a bolting rabbit; sprinting still has to be evolved for
+  metabolism: 0.5,
+  fecundity: 0.36, // longer gestation and a higher bar to breed at all
   // Lower than the rabbits' own founder mean (0.28, see rabbit.js), and
   // below the usable threshold either way: a lake should start out as a
   // place prey escapes to, and a fox lineage should have to earn its way in
@@ -62,7 +76,7 @@ function clamp01(v) {
   return Math.min(1, Math.max(0, v))
 }
 
-// Box-Muller, matching brain.js's mutation noise: gaussian rather than
+// Box-Muller, matching net.js's mutation noise: gaussian rather than
 // uniform, so small drifts are common and big jumps are rare.
 function gaussian(rng) {
   const u1 = Math.max(1e-9, rng())
@@ -99,27 +113,67 @@ function lerp(a, b, t) {
 // rabbits: a rabbit walks 0.5 tiles/tick and runs 1.0 (see stepEveryTicks in
 // simulation.js), so a mid-speed fox out-walks a rabbit but only an
 // above-average one can run a fleeing rabbit down in a straight line.
-export const FOX_ENERGY_MAX = 120
+//
+// The energy numbers were reworked when the foxes got brains. A fox's tank
+// is much bigger and its upkeep much lower than it was, because the old fox
+// was on a ~100 second timer from full: on a big island, five scattered
+// founders simply starved before they found their first rabbit, which is
+// not a predator/prey dynamic, it's a stopwatch. A fox now has real runway
+// to search - and, if its brain has evolved to lie up between meals,
+// several minutes more on top (see restUpkeepFactor).
+export const FOX_ENERGY_MAX = 170
 
 const PROWL_TILES_PER_TICK = [0.3, 0.6] // at speed 0 -> 1
-const SPRINT_MULTIPLIER = 2.05
+const SPRINT_MULTIPLIER = 1.95
 const VISION_TILES = [4, 12]
 // How much of its vision a fox keeps while standing in forest (issue #14):
 // under a canopy it loses 45% of its spotting range, which is what makes
 // woodland a place a rabbit can actually live rather than just the place the
 // apples are.
 export const FOREST_VISION_FACTOR = 0.55
-const KILL_ENERGY = [34, 68] // by metabolism: burns hot, but strips a carcass better
-// Raised from [0.34, 0.86] (issue #14). Foxes were cheap enough to run that
-// a single kill funded a long prowl, so the population compounded until the
-// rabbits were gone; now a fox spends most of a carcass just staying alive.
-const UPKEEP_PER_SEC = [0.38, 0.92] // by metabolism, before the gene surcharge
+// And what a rabbit's scent is worth under the same trees. Undergrowth
+// muddles a smell far less than a canopy blocks a sightline, which is
+// precisely why a fox has a nose at all: in woodland it is the sense that
+// still works.
+export const FOREST_SCENT_FACTOR = 0.85
+// The nose. It reaches about as far as the fox's eyes, but it says something
+// different: a *bearing* rather than a position (and a noisy one - see
+// SCENT_JITTER in simulation.js), and it works where sight does not. Under
+// the canopy a fox loses 45% of its vision and only 15% of its nose, so
+// woodland is where a fox hunts by smell and open ground is where it hunts
+// by eye. That is what turns its search into searching rather than
+// wandering, which is what founders on a big island need to survive long
+// enough to matter.
+//
+// Derived from the vision gene rather than being a gene of its own - "sharp
+// senses" is one investment, and it is priced as one in geneCost below - so
+// a short-sighted fox is short-nosed too. A longer nose was tried and it
+// simply wiped the rabbits out: at 1.7x sight a pack could find the last
+// five rabbits on the island, which ends the run instead of cycling it. It
+// came down again (1.0 -> 0.9) when the swim gene landed and a shoreline
+// stopped being something a cornered rabbit could cross.
+const SCENT_VISION_MULTIPLIER = 0.9
+const KILL_ENERGY = [30, 55] // by metabolism: burns hot, but strips a carcass better
+const UPKEEP_PER_SEC = [0.10, 0.26] // by metabolism, before the gene surcharge
 const SPRINT_UPKEEP_MULTIPLIER = 2.2
+// What lying up is worth. A resting fox does not move and cannot find
+// anything, so this is a genuine trade - wait out a lean patch on half
+// rations, or spend the reserve looking. Which one a lineage picks is the
+// most interesting thing its brain can evolve (see REST_OUTPUT in
+// foxBrain.js).
+const REST_UPKEEP_FACTOR = 0.45
 const SPRINT_TICKS = [14, 58] // by stamina - how long a chase can be pressed
-// Both raised (issue #14): breeding costs more reserve and takes far longer,
-// so fox numbers lag their food supply instead of tracking it instantly.
-const BREED_ENERGY = [112, 84] // by fecundity: eager foxes breed at lower reserves
-const GESTATION_MS = [110000, 68000] // by fecundity
+// Deliberately above FOX_START_ENERGY for all but the most fecund founder:
+// a fox you drop on the map has to catch something before it turns into two
+// foxes, or five scattered founders quietly become eleven before a single
+// rabbit has been eaten.
+const BREED_ENERGY = [165, 140] // by fecundity: eager foxes breed at lower reserves
+// Gestation, shortened at both ends: a fox line that has to hold a
+// pregnancy for the best part of two minutes cannot answer a rabbit boom
+// before it has already turned into a bust, so the population never cycles -
+// it just drifts down. Cubs still cost energy and a cub still has to feed
+// itself, so this is a faster loop rather than a free one.
+const GESTATION_MS = [58000, 30000] // by fecundity
 
 /**
  * Everything the sim actually reads, derived from the 0..1 genes. Pure and
@@ -138,11 +192,16 @@ export function foxStats(genes) {
   // paid for in rabbits rather than being a free upgrade every lineage
   // drifts into. At speed 1 the surcharge is 0.85 where it used to be 0.40.
   const speedCost = 0.3 * genes.speed + 0.55 * genes.speed * genes.speed
-  const geneCost = 1 + speedCost + 0.3 * genes.vision + 0.22 * genes.camouflage + 0.18 * genes.stamina
+  // Vision's share went up (0.30 -> 0.45) when it started buying a nose as
+  // well as eyes: senses are the strongest thing a fox can invest in now, so
+  // they have to be the dearest to run.
+  const geneCost = 1 + speedCost + 0.45 * genes.vision + 0.22 * genes.camouflage + 0.18 * genes.stamina
+  const visionRadius = lerp(VISION_TILES[0], VISION_TILES[1], genes.vision)
   return {
     prowlTilesPerTick: lerp(PROWL_TILES_PER_TICK[0], PROWL_TILES_PER_TICK[1], genes.speed),
     sprintTilesPerTick: lerp(PROWL_TILES_PER_TICK[0], PROWL_TILES_PER_TICK[1], genes.speed) * SPRINT_MULTIPLIER,
-    visionRadius: lerp(VISION_TILES[0], VISION_TILES[1], genes.vision),
+    visionRadius,
+    scentRadius: visionRadius * SCENT_VISION_MULTIPLIER,
     // How close this fox gets before a rabbit notices it, as a fraction of
     // the rabbit's own predator-spotting range (see PREY_ALERT_RADIUS in
     // simulation.js). A fully camouflaged fox is on top of its prey before
@@ -151,13 +210,12 @@ export function foxStats(genes) {
     energyPerKill: lerp(KILL_ENERGY[0], KILL_ENERGY[1], genes.metabolism),
     upkeepPerSec: lerp(UPKEEP_PER_SEC[0], UPKEEP_PER_SEC[1], genes.metabolism) * geneCost,
     sprintUpkeepMultiplier: SPRINT_UPKEEP_MULTIPLIER,
-    // Above this energy a fox stops bothering to chase. A bloodlust of 1
-    // sits above FOX_ENERGY_MAX, i.e. it hunts even with a full belly.
-    huntBelowEnergy: lerp(46, FOX_ENERGY_MAX + 10, genes.bloodlust),
+    restUpkeepFactor: REST_UPKEEP_FACTOR,
     maxSprintTicks: Math.round(lerp(SPRINT_TICKS[0], SPRINT_TICKS[1], genes.stamina)),
-    // Pack tendency does two things: it pulls idle foxes toward each other,
-    // and it makes a chase faster when a packmate is close enough to help
-    // cut the rabbit off.
+    // Pack instinct is the *hardware* half of hunting together: how far away
+    // a fox can keep track of a packmate, and how much faster a chase closes
+    // with one alongside. Whether it actually converges on the pack is its
+    // brain's call (see GROUP_OUTPUT in foxBrain.js).
     packRadius: lerp(6, 18, genes.packTendency),
     packSpeedBonus: lerp(0, 0.3, genes.packTendency),
     breedEnergy: lerp(BREED_ENERGY[0], BREED_ENERGY[1], genes.fecundity),
@@ -175,11 +233,13 @@ export function foxStats(genes) {
 /**
  * A 0..1 "how frightening is this individual" score, for the UI. Weighted
  * toward the genes a rabbit would actually care about: how fast it closes,
- * how far it sees, how late you notice it, and how readily it attacks.
+ * how far it senses, and how late you notice it. What it *does* with that
+ * body is its brain's business (see computeFoxTraits in foxInsight.js), so
+ * this is the body's half of the answer.
  */
 export function foxMenace(genes) {
   const g = genes
-  return clamp01(0.34 * g.speed + 0.22 * g.vision + 0.2 * g.camouflage + 0.16 * g.bloodlust + 0.08 * g.stamina)
+  return clamp01(0.38 * g.speed + 0.26 * g.vision + 0.24 * g.camouflage + 0.12 * g.stamina)
 }
 
 function levelWord(v) {
@@ -200,17 +260,17 @@ export function describeFox(genes) {
       : menace < 0.34
         ? 'More of a scavenger than a terror - rabbits often get away.'
         : 'A workable hunter: it eats, but it has to earn every meal.'
-  return `This fox is ${best.high} and ${second.high}, but ${worst.low}. ${verdict}`
+  return `This fox ${best.high} and ${second.high}, but ${worst.low}. ${verdict}`
 }
 
 /** Short "what this gene is doing right now" notes for the inspector. */
 export function describeFoxStats(genes) {
   const s = foxStats(genes)
   return [
-    `Sees prey ${s.visionRadius.toFixed(1)} tiles away - only ${(s.visionRadius * FOREST_VISION_FACTOR).toFixed(1)} under forest cover - and closes at ${s.sprintTilesPerTick.toFixed(2)} tiles/tick flat out (a running rabbit does 1.00).`,
-    `Rabbits only notice it at ${Math.round(s.stealthFactor * 100)}% of their normal spotting range.`,
-    `Burns ${s.upkeepPerSec.toFixed(2)} energy/sec prowling and gains ${Math.round(s.energyPerKill)} per kill, so it needs a rabbit every ~${Math.round(s.energyPerKill / s.upkeepPerSec)}s to break even.`,
-    `Hunts whenever its energy is below ${Math.round(s.huntBelowEnergy)} (${levelWord(genes.bloodlust)} desire to hunt), and can press a chase for ${s.maxSprintTicks} ticks before it has to break off.`,
+    `Sees prey ${s.visionRadius.toFixed(1)} tiles off, or only ${(s.visionRadius * FOREST_VISION_FACTOR).toFixed(1)} under forest cover - but smells it at ${s.scentRadius.toFixed(1)} tiles, and still ${(s.scentRadius * FOREST_SCENT_FACTOR).toFixed(1)} in the trees, which is what makes woodland huntable at all.`,
+    `Closes at ${s.sprintTilesPerTick.toFixed(2)} tiles/tick flat out (a running rabbit does 1.00), and rabbits only notice it at ${Math.round(s.stealthFactor * 100)}% of their normal spotting range.`,
+    `Burns ${s.upkeepPerSec.toFixed(2)} energy/sec prowling (${(s.upkeepPerSec * s.restUpkeepFactor).toFixed(2)} lying up) and gains ${Math.round(s.energyPerKill)} per kill, so it needs a rabbit every ~${Math.round(s.energyPerKill / s.upkeepPerSec)}s to break even.`,
+    `Can press a chase for ${s.maxSprintTicks} ticks before breaking off, and needs ${Math.round(s.breedEnergy)} energy to start a ${Math.round(s.gestationMs / 1000)}s pregnancy (${levelWord(genes.fecundity)} fecundity).`,
     describeSwimming(s.swimSkill),
   ]
 }

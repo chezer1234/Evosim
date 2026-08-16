@@ -2,15 +2,17 @@
 // loops, energy/lifecycle and reproduction for both rabbits and the foxes
 // that hunt them.
 //
-// Rabbits are driven by a neural-net genome (see ./brain.js and
-// docs/plans/issue-2-species-rabbits.md); foxes by an explicit gene vector
-// (see ./fox.js and docs/plans/issue-11-predator-foxes.md). Movement is
-// discrete tile-stepping either way - rabbits step on a fixed tick cadence
-// (slower swimming, faster running), foxes accumulate a fractional
-// tiles-per-tick budget so their speed gene can vary continuously. What the
-// *screen* shows is interpolated between those tile steps (see ./motion.js);
-// the grid below is unchanged, and stays the only thing the sim reasons
-// about.
+// Both species now think with a neural net - rabbits via ./brain.js (see
+// docs/plans/issue-2-species-rabbits.md), foxes via ./foxBrain.js (see
+// docs/plans/fox-neural-nets.md) - and both also carry an explicit gene
+// vector for the parts of an animal a weight matrix cannot express: the
+// rabbit's ears, voice and swim skill (./rabbit.js) and the fox's whole
+// body (./fox.js). Movement is discrete tile-stepping either way - rabbits
+// step on a fixed tick cadence (slower swimming, faster running), foxes
+// accumulate a fractional tiles-per-tick budget so their speed gene can vary
+// continuously. What the *screen* shows is interpolated between those tile
+// steps (see ./motion.js); the grid below is unchanged, and stays the only
+// thing the sim reasons about.
 //
 // Water is terrain with an entry requirement (see ./water.js): both species
 // carry a heritable swim gene, and below the usable threshold a shoreline is
@@ -20,7 +22,9 @@
 
 import { createBrain, mutateBrain, think } from './brain.js'
 import { computeTraits } from './brainInsight.js'
-import { FOREST_VISION_FACTOR, FOX_ENERGY_MAX, FOX_GENE_KEYS, createFoxGenes, foxStats, mutateFoxGenes } from './fox.js'
+import { createFoxBrain, foxThink, mutateFoxBrain } from './foxBrain.js'
+import { computeFoxTraits } from './foxInsight.js'
+import { FOREST_SCENT_FACTOR, FOREST_VISION_FACTOR, FOX_ENERGY_MAX, FOX_GENE_KEYS, createFoxGenes, foxStats, mutateFoxGenes } from './fox.js'
 import { RABBIT_GENE_KEYS, alarmReach, createRabbitGenes, mutateRabbitGenes, rabbitStats } from './rabbit.js'
 import { HOP, SWIM, advanceMotion, attachMotion, beginMove, teleportMotion } from './motion.js'
 import { FLOUNDER_DRAIN_FACTOR, FLOUNDER_SPEED_FACTOR, isWaterTile, towardNearestLand } from './water.js'
@@ -43,6 +47,15 @@ const ENERGY_START = 100
 const ENERGY_MAX = 100
 const ENERGY_DEPLETE_NORMAL_MS = 2500 // -1 energy every 2.5s at rest/walk
 const ENERGY_DEPLETE_RUN_MS = 1000 // -1 energy every 1s while running
+// A rabbit sitting in the dark doing nothing burns far less than one out
+// grazing. This matters much more than it sounds: now that the foxes
+// survive long enough to be a permanent presence rather than a bad week,
+// rabbits spend a third to a half of their lives underground, and at the
+// surface burn rate that was slow starvation for the whole warren - the
+// population stopped breeding and dwindled without a single extra rabbit
+// being caught. A burrow costs you your foraging time; it should not also
+// cost you the same energy as foraging.
+const ENERGY_DEPLETE_SHELTERED_MS = 5500
 const EAT_GAIN = 10
 // With no apple in vision, the brain only ever sees a constant food signal
 // (dx=0, dy=0, dist=1) plus one noisy input, so its evolved move outputs
@@ -109,12 +122,47 @@ export const POUNCE_RANGE = 1
 // out of your depth is not the same as being slow at something you can do.
 const FLOUNDER_STROKE_TICKS = 8
 const FOX_FEED_MS = 1800 // stands over the carcass, out of the chase
-const FOX_START_ENERGY = 95
-const FOX_CUB_ENERGY = 70
-const FOX_REPRO_COST = 22
-const FOX_SPRINT_RANGE = 7 // only worth sprinting once the prey is this close
+const FOX_START_ENERGY = 100
+const FOX_CUB_ENERGY = 60
+const FOX_REPRO_COST = 110
+const FOX_SPRINT_RANGE = 5 // only worth sprinting once the prey is this close
+// How wrong a scent bearing is at the very edge of a fox's nose, in radians
+// (+/-). Scale it by how far off the rabbit is and you get the behaviour the
+// input is meant to have: a faint smell from across the island only tells
+// you roughly which way to walk, and it sharpens into something you can
+// actually chase as you close. Re-rolled every decision tick, so a fox
+// following a distant scent casts about the way a real one does instead of
+// walking a laser-straight line to its dinner.
+const SCENT_JITTER = 1.1
+// Below this, a fox will not lie up however strongly its brain votes for it.
+// Same reasoning as the rabbits' hunger override: resting finds nothing, so
+// a lineage that naps through starvation would be selected out by dying in
+// its sleep, which is a slow and boring way to learn a lesson the sim can
+// just hardwire. Lying up is for waiting out a lean patch with reserves in
+// the tank, not for the last of them.
+const FOX_ROUSE_ENERGY = FOX_ENERGY_MAX * 0.3
 const FOX_MAX_STEPS_PER_TICK = 2 // safety rail on the fractional step budget
 const FOX_PACK_KEEP_DISTANCE = 2.5 // don't crowd a packmate once alongside it
+// Territory. A vixen will not raise cubs with another fox's scent this close
+// to the den, and that single rule is what stops the population from
+// overshooting its food supply: without it a good few minutes of hunting
+// turns five foxes into twenty, the twenty strip the island bare, and both
+// species end the run at zero. It caps how many *breeding* foxes an island
+// supports without capping how many can live on it, which is exactly the
+// shape a predator/prey cycle needs - and it gives the pack instinct a real
+// cost, since foxes that hunt shoulder to shoulder are foxes that cannot
+// breed. Widened from 18 when the swim gene landed (#17): a shoreline a
+// non-swimming rabbit cannot cross is a wall it can be pinned against, so
+// the same fox density catches far more than it used to.
+const FOX_TERRITORY_RADIUS = 24
+// How long after a litter before a fox will carry another. Gestation itself
+// is short now (30-58s, deliberately - see GESTATION_MS in fox.js), and
+// without a recovery period a well-fed fox simply converts every second
+// kill into another fox: a rabbit boom becomes a fox boom within a couple
+// of minutes, and the foxes then strip the island. This is the *rate* limit
+// that lets the prey population recover between litters, where the
+// territory rule above is the *density* limit.
+const FOX_LITTER_RECOVERY_MS = 150000
 // How loud a fox is to a rabbit's ears. Hearing is the sense camouflage
 // can't beat (issue #14) - but it can be beaten by *moving quietly*, which
 // is what keeps a stalking fox viable: a sprint through the undergrowth
@@ -123,6 +171,13 @@ const FOX_PACK_KEEP_DISTANCE = 2.5 // don't crowd a packmate once alongside it
 // speed gene is what a fox pays with, not its coat.
 const FOX_NOISE_SPRINTING = 1.25
 const FOX_NOISE_FEEDING = 0.6
+// A fox lying up is the quietest thing on the island - quieter even than one
+// eating. That is the other half of what the brain's rest output buys: an
+// ambusher does not broadcast its position, so the rabbits around it carry
+// on grazing instead of spending the afternoon bolting from a fox that was
+// never coming. It is also what stops a handful of foxes from suppressing a
+// small warren's breeding just by existing near it.
+const FOX_NOISE_RESTING = 0.3
 const FOX_NOISE_PROWLING = [0.5, 1.0] // by speed gene: a slow stalker is quiet
 
 // ========================= Alarm calls / burrows =========================
@@ -280,9 +335,10 @@ export function spawnRabbit(sim, x, y, brain, startEnergy = ENERGY_START, genera
   return rabbit
 }
 
-/** A fox. `genes` defaults to a fresh founder genome (see ./fox.js); cubs
- * are given a mutated copy of their parent's by finishFoxGestation. */
-export function spawnFox(sim, x, y, genes, startEnergy = FOX_START_ENERGY, generation = 0) {
+/** A fox. `genes` defaults to a fresh founder genome (see ./fox.js) and
+ * `brain` to a fresh founder net (see ./foxBrain.js); cubs are given a
+ * mutated copy of both by finishFoxGestation. */
+export function spawnFox(sim, x, y, genes, startEnergy = FOX_START_ENERGY, generation = 0, brain = null) {
   const fox = {
     id: nextFoxId++,
     x,
@@ -290,6 +346,9 @@ export function spawnFox(sim, x, y, genes, startEnergy = FOX_START_ENERGY, gener
     energy: startEnergy,
     alive: true,
     genes: genes || createFoxGenes(Math.random),
+    // The decision half of the genome: when to chase, sprint, track a
+    // scent, join the pack, lie up and breed.
+    brain: brain || createFoxBrain(Math.random),
     tickAccum: 0,
     // Fractional tiles-per-tick budget: a whole tile is stepped each time
     // this crosses 1, which is what lets the speed gene be continuous
@@ -297,10 +356,21 @@ export function spawnFox(sim, x, y, genes, startEnergy = FOX_START_ENERGY, gener
     stepCredit: 0,
     sprinting: false,
     hunting: false,
+    // Following a scent to a rabbit it cannot see - the state that makes a
+    // fox's search look like searching. `scentStrength` is what its nose is
+    // currently picking up (0..1), kept on the entity for the inspector.
+    tracking: false,
+    scentStrength: 0,
+    // Lying up: not moving, and burning upkeep at restUpkeepFactor.
+    resting: false,
     packing: false,
     feedingRemaining: 0,
     gestating: false,
     gestationRemaining: 0,
+    // Cubs of its own are off the table until this clock time (see
+    // FOX_LITTER_RECOVERY_MS). Cubs are born already on the clock, so a
+    // litter cannot immediately have litters of its own.
+    nextLitterAt: 0,
     generation,
     kills: 0,
     // Chase budget, in decision ticks, refilled while not sprinting.
@@ -352,6 +422,7 @@ function findNearestApple(sim, x, y) {
  * can be heard. Sprinting gives it away; standing over a carcass doesn't. */
 function foxNoiseFactor(fox) {
   if (fox.sprinting) return FOX_NOISE_SPRINTING
+  if (fox.resting) return FOX_NOISE_RESTING
   if (fox.feedingRemaining > 0) return FOX_NOISE_FEEDING
   return FOX_NOISE_PROWLING[0] + (FOX_NOISE_PROWLING[1] - FOX_NOISE_PROWLING[0]) * fox.genes.speed
 }
@@ -452,6 +523,64 @@ function findNearestPrey(sim, fox, visionRadius) {
     best = rabbit
   }
   return best ? { rabbit: best, dist: bestDist } : null
+}
+
+/** How strong a rabbit smells, as a multiplier on how far a fox can pick it
+ * up. The exact mirror of foxNoiseFactor above: a bolting rabbit leaves a
+ * hot trail, one sitting still barely registers. It also means the rabbits'
+ * own evolved behaviour feeds back into how findable they are - a lineage
+ * that panics at every shadow is easier to track than one that holds its
+ * nerve, which is a cost `skittishness` never used to pay. */
+function rabbitScentFactor(map, rabbit) {
+  let factor = rabbit.running ? 1.3 : rabbit.resting ? 0.55 : 1
+  // Undergrowth masks a scent the way a canopy masks a sightline. Woodland
+  // already costs a fox 45% of its vision (FOREST_VISION_FACTOR); without
+  // the same discount on its nose, the trees stopped being a refuge the
+  // moment foxes could smell - and a refuge is the thing that decides
+  // whether a prey population can survive a bad few minutes at all.
+  if (map.tileType[rabbit.y * map.size + rabbit.x] === TILE.FOREST) factor *= FOREST_SCENT_FACTOR
+  return factor
+}
+
+/**
+ * What a fox's nose is telling it: a rough bearing to the nearest rabbit it
+ * can smell, plus how strong the smell is.
+ *
+ * Scent is deliberately the long, *unreliable* sense - the mirror image of
+ * the rabbit's hearing, which is long and reliable but only picks up noise
+ * the fox chooses to make. The bearing is jittered by SCENT_JITTER scaled by
+ * distance, so a smell from across the island is worth following but won't
+ * take you straight there, while one from a few tiles away is nearly as good
+ * as sight. Without it a fox on a big island searches by pure random walk,
+ * which is why five founders used to starve before they ever met a rabbit.
+ *
+ * Rabbits underground leave nothing to smell - the same "simply not there"
+ * rule the fox's eyes use, and one more reason a burrow is worth digging.
+ */
+function senseScent(sim, fox, radius) {
+  let best = null
+  let bestDist = Infinity
+  let bestReach = 0
+  for (const rabbit of sim.rabbits) {
+    if (!rabbit.alive || rabbit.burrowId != null) continue
+    const dist = Math.hypot(rabbit.x - fox.x, rabbit.y - fox.y)
+    if (dist >= bestDist) continue
+    const reach = radius * rabbitScentFactor(sim.map, rabbit)
+    if (dist > reach) continue
+    bestDist = dist
+    bestReach = reach
+    best = rabbit
+  }
+  if (!best) return null
+  const trueBearing = Math.atan2(best.y - fox.y, best.x - fox.x)
+  const vagueness = (bestDist / bestReach) * SCENT_JITTER
+  const bearing = trueBearing + (Math.random() * 2 - 1) * vagueness
+  return {
+    dx: Math.cos(bearing),
+    dy: Math.sin(bearing),
+    dist: bestDist,
+    strength: 1 - bestDist / bestReach,
+  }
 }
 
 /** The nearest other live fox within `radius`, for pack behaviour. */
@@ -654,7 +783,14 @@ function runShelteredTick(sim, rabbit, burrow, out, threat) {
   rabbit.fleeing = false
   rabbit.shelterTicks += 1
   rabbit.quietTicks = threat ? 0 : rabbit.quietTicks + 1
-  if (threat) callAlarm(sim, rabbit, threat.x, threat.y)
+  // Only ever shout about a fox this rabbit has picked up *itself*.
+  // Relaying someone else's alarm sounds helpful and is catastrophic: two
+  // rabbits within earshot of each other keep each other's alarm alive
+  // forever, so a warren that has gone to ground never hears an all-clear,
+  // never comes up, never eats and quietly stops breeding. (The surface
+  // code has always been firsthand-only, see runDecisionTick - this is the
+  // sheltered path catching up with it.)
+  if (threat && threat.firsthand) callAlarm(sim, rabbit, threat.x, threat.y)
   callBurrow(sim, rabbit, burrow)
 
   if (rabbit.shelterTicks < SHELTER_MIN_TICKS) return
@@ -913,9 +1049,13 @@ function stepRabbit(sim, rabbit, dtMs) {
   // Staying afloat is work: a weak swimmer burns over three times what it
   // would walking (see swimDrainFactor), and anything out of its depth burns
   // more again. That cost is the entire reason a lake is a gamble rather
-  // than a free hiding place.
+  // than a free hiding place. Underground is the opposite end of the same
+  // scale - a rabbit asleep in a burrow burns less than one out grazing,
+  // which is what stops a warren sheltering from a permanent fox presence
+  // from quietly starving itself.
   const swimDrain = rabbit.floundering ? FLOUNDER_DRAIN_FACTOR : rabbit.swimming ? rabbit.senses.swimDrainFactor : 1
-  const threshold = (rabbit.running ? ENERGY_DEPLETE_RUN_MS : ENERGY_DEPLETE_NORMAL_MS) / swimDrain
+  const effort = rabbit.burrowId != null ? ENERGY_DEPLETE_SHELTERED_MS : rabbit.running ? ENERGY_DEPLETE_RUN_MS : ENERGY_DEPLETE_NORMAL_MS
+  const threshold = effort / swimDrain
   while (rabbit.energyAccum >= threshold) {
     rabbit.energyAccum -= threshold
     rabbit.energy -= 1
@@ -1020,8 +1160,16 @@ function tryPounce(sim, fox, stats) {
   }
 }
 
-function tryFoxReproduce(sim, fox, stats) {
-  if (fox.gestating || fox.energy <= stats.breedEnergy) return
+/** True when another live fox is close enough that this one will not den
+ * here (see FOX_TERRITORY_RADIUS). */
+function territoryTaken(sim, fox) {
+  return sim.foxes.some((other) => other !== fox && other.alive && Math.hypot(other.x - fox.x, other.y - fox.y) <= FOX_TERRITORY_RADIUS)
+}
+
+function tryFoxReproduce(sim, fox, stats, wants) {
+  if (fox.gestating || !wants || fox.energy <= stats.breedEnergy) return
+  if (sim.clock < fox.nextLitterAt) return
+  if (territoryTaken(sim, fox)) return
   fox.energy -= FOX_REPRO_COST
   fox.gestating = true
   fox.gestationRemaining = stats.gestationMs
@@ -1029,17 +1177,52 @@ function tryFoxReproduce(sim, fox, stats) {
 
 function finishFoxGestation(sim, fox) {
   fox.gestating = false
+  fox.nextLitterAt = sim.clock + FOX_LITTER_RECOVERY_MS
   const cubGenes = mutateFoxGenes(fox.genes, Math.random)
+  const cubBrain = mutateFoxBrain(fox.brain, Math.random)
   const cubGen = fox.generation + 1
   for (const [dx, dy] of NEIGHBOR_OFFSETS) {
     const nx = fox.x + dx
     const ny = fox.y + dy
     if (isPlaceable(sim.map, nx, ny)) {
-      spawnFox(sim, nx, ny, cubGenes, FOX_CUB_ENERGY, cubGen)
+      const cub = spawnFox(sim, nx, ny, cubGenes, FOX_CUB_ENERGY, cubGen, cubBrain)
+      cub.nextLitterAt = sim.clock + FOX_LITTER_RECOVERY_MS
       return
     }
   }
-  spawnFox(sim, fox.x, fox.y, cubGenes, FOX_CUB_ENERGY, cubGen)
+  const cub = spawnFox(sim, fox.x, fox.y, cubGenes, FOX_CUB_ENERGY, cubGen, cubBrain)
+  cub.nextLitterAt = sim.clock + FOX_LITTER_RECOVERY_MS
+}
+
+/**
+ * What the fox's net gets to see this tick. Order is load-bearing - it has
+ * to match FOX_INPUT_LABELS / the IN indices in foxInsight.js, which is what
+ * the trait bars and the network diagram are labelled from.
+ *
+ * Directions are unit vectors and distances are normalized against the
+ * sense that produced them, so every fox reads its world on the same 0..1
+ * scale whatever its genes are: "prey distance 1" means "at the edge of what
+ * I can see", not a fixed number of tiles. Nothing detected reads as
+ * distance 1 with a zero direction - the same convention the rabbit inputs
+ * use for "no apple, no fox".
+ */
+function buildFoxInputs(fox, stats, prey, scent, packmate, visionRadius, inForest) {
+  return [
+    1,
+    fox.energy / FOX_ENERGY_MAX,
+    prey ? (prey.rabbit.x - fox.x) / visionRadius : 0,
+    prey ? (prey.rabbit.y - fox.y) / visionRadius : 0,
+    prey ? prey.dist / visionRadius : 1,
+    scent ? scent.dx : 0,
+    scent ? scent.dy : 0,
+    scent ? scent.strength : 0,
+    packmate ? (packmate.fox.x - fox.x) / stats.packRadius : 0,
+    packmate ? (packmate.fox.y - fox.y) / stats.packRadius : 0,
+    packmate ? packmate.dist / stats.packRadius : 1,
+    Math.min(1, fox.sprintBudget / Math.max(1, stats.maxSprintTicks)),
+    inForest ? 1 : 0,
+    Math.random() * 2 - 1,
+  ]
 }
 
 function runFoxDecisionTick(sim, fox) {
@@ -1064,6 +1247,8 @@ function runFoxDecisionTick(sim, fox) {
   if (fox.feedingRemaining > 0) {
     fox.hunting = false
     fox.sprinting = false
+    fox.tracking = false
+    fox.resting = false
     fox.sprintBudget = Math.min(stats.maxSprintTicks, fox.sprintBudget + 0.5 + fox.genes.stamina)
     return
   }
@@ -1072,16 +1257,37 @@ function runFoxDecisionTick(sim, fox) {
   // is hunting by luck as much as by eyesight, which is what turns woodland
   // into somewhere a rabbit can plausibly live rather than just the place
   // the apples are. Measured from the tile the *fox* is standing on - it's
-  // the fox's own sightlines the trees are blocking.
+  // the fox's own sightlines the trees are blocking. Its nose is unaffected:
+  // trees block sightlines, not smells, which is what stops woodland from
+  // being a place rabbits are simply safe.
   const inForest = sim.map.tileType[fox.y * sim.map.size + fox.x] === TILE.FOREST
   const visionRadius = stats.visionRadius * (inForest ? FOREST_VISION_FACTOR : 1)
   const prey = findNearestPrey(sim, fox, visionRadius)
+  const scent = senseScent(sim, fox, stats.scentRadius)
   const packmate = findNearestPackmate(sim, fox, stats.packRadius)
   fox.packing = !!packmate
-  // "Desire to hunt": a high-bloodlust fox's threshold sits above its own
-  // maximum energy, so it hunts constantly; a low one only bothers once it
-  // is genuinely hungry.
-  fox.hunting = !!prey && fox.energy < stats.huntBelowEnergy
+  fox.scentStrength = scent ? scent.strength : 0
+
+  const out = foxThink(fox.brain, buildFoxInputs(fox, stats, prey, scent, packmate, visionRadius, inForest))
+
+  // Every one of these is the brain's call, gated at 0.5 - where the old fox
+  // had an if/else ladder and one `bloodlust` number. Hunting a rabbit it
+  // can see beats following a smell, which beats regrouping, which beats
+  // lying down: a fox cannot do two of them at once, so they resolve in
+  // order of how immediate they are rather than by which output happens to
+  // be largest.
+  fox.hunting = !!prey && out.chase > 0.5
+  // Lying up outranks the nose on purpose: "sit tight and take whatever
+  // wanders past" and "walk the island following smells" are the two
+  // strategies this net can express, and they are only genuinely different
+  // if choosing the first one means passing up the second. Hunger overrides
+  // it either way (see FOX_ROUSE_ENERGY) - resting finds nothing, so it has
+  // to be something a fox does with reserves, not instead of eating.
+  // Not in the water, either: treading water is not resting, and a fox
+  // that stopped swimming to have a lie-down would simply drown.
+  fox.resting = !fox.hunting && !fox.swimming && out.rest > 0.5 && fox.energy > FOX_ROUSE_ENERGY
+  fox.tracking = !fox.hunting && !fox.resting && !!scent && out.track > 0.5
+  const grouping = !fox.hunting && !fox.resting && !fox.tracking && !!packmate && out.group > 0.5 && packmate.dist > FOX_PACK_KEEP_DISTANCE
 
   let moveX = 0
   let moveY = 0
@@ -1093,27 +1299,34 @@ function runFoxDecisionTick(sim, fox) {
     const len = Math.hypot(dx, dy) || 1
     moveX = dx / len
     moveY = dy / len
-    // Sprinting is rationed by stamina and only spent once the prey is
-    // close enough for the burst to actually end in a pounce.
-    fox.sprinting = fox.sprintBudget >= 1 && prey.dist <= FOX_SPRINT_RANGE
+    // Sprinting is rationed by stamina and only worth spending once the prey
+    // is close enough for the burst to end in a pounce - but *whether* to
+    // spend it there is the brain's decision, so a lineage can evolve into
+    // patient stalkers or into foxes that blow their legs out at every
+    // glimpse of a rabbit.
+    fox.sprinting = fox.sprintBudget >= 1 && prey.dist <= FOX_SPRINT_RANGE && out.sprint > 0.5
     if (fox.sprinting) {
       fox.sprintBudget -= 1
       // A packmate in support means the rabbit has two directions to worry
       // about, so the chase closes faster. This is the second half of what
-      // pack tendency buys, alongside the pull toward other foxes below.
+      // pack instinct buys, alongside the pull toward other foxes below.
       tilesPerTick = stats.sprintTilesPerTick * (fox.packing ? 1 + stats.packSpeedBonus : 1)
     }
   } else {
     fox.sprinting = false
-    if (packmate && packmate.dist > FOX_PACK_KEEP_DISTANCE) {
+    if (fox.tracking) {
+      // Up the scent gradient, or at least the fox's best guess at it.
+      moveX = scent.dx
+      moveY = scent.dy
+    } else if (grouping) {
       // Regroup: drift toward the pack rather than sweeping alone, so
-      // high-packTendency lineages end up hunting the same ground together.
+      // sociable lineages end up hunting the same ground together.
       const dx = packmate.fox.x - fox.x
       const dy = packmate.fox.y - fox.y
       const len = Math.hypot(dx, dy) || 1
       moveX = dx / len
       moveY = dy / len
-    } else {
+    } else if (!fox.resting) {
       // Same held-then-re-randomized sweep the rabbits use when blind.
       updateSearchHeading(fox)
       moveX = Math.cos(fox.searchHeading)
@@ -1130,18 +1343,22 @@ function runFoxDecisionTick(sim, fox) {
     tilesPerTick = stats.prowlTilesPerTick * stats.swimSpeedFactor
   }
 
-  moveFox(sim, fox, moveX, moveY, tilesPerTick, stats)
+  if (!fox.resting) moveFox(sim, fox, moveX, moveY, tilesPerTick, stats)
   updateWaterState(fox, sim, stats.canSwim)
   tryPounce(sim, fox, stats)
-  tryFoxReproduce(sim, fox, stats)
+  tryFoxReproduce(sim, fox, stats, out.breed > 0.5)
 }
 
 function stepFox(sim, fox, dtMs) {
   const stats = foxStats(fox.genes)
   // Continuous drain rather than the rabbits' whole-number ticks: a fox's
-  // burn rate is a gene, so it needs the resolution.
+  // burn rate is a gene, so it needs the resolution. A fox lying up burns a
+  // fraction of it - the payoff for a decision its brain made and could just
+  // as easily evolve out of - and one in the water burns more, whether it is
+  // swimming properly or out of its depth.
   const swimDrain = fox.floundering ? FLOUNDER_DRAIN_FACTOR : fox.swimming ? stats.swimUpkeepMultiplier : 1
-  fox.energy -= stats.upkeepPerSec * (fox.sprinting ? stats.sprintUpkeepMultiplier : 1) * swimDrain * (dtMs / 1000)
+  const effort = fox.sprinting ? stats.sprintUpkeepMultiplier : fox.resting ? stats.restUpkeepFactor : 1
+  fox.energy -= stats.upkeepPerSec * effort * swimDrain * (dtMs / 1000)
   if (fox.energy <= 0) {
     fox.energy = 0
     fox.alive = false
@@ -1197,6 +1414,26 @@ function averageFoxGenes(foxes) {
   return avg
 }
 
+// The fox instincts worth a trend line, from the same net the inspector
+// draws (see foxInsight.js). This is the fox half of "watch selection
+// happen": a pack that starts out chasing everything and drifts toward
+// hunting only when hungry has been taught that by the rabbits.
+const FOX_TRAIT_KEYS = ['aggression', 'tracking', 'commitment', 'sociability', 'idleness', 'broodiness', 'patience']
+
+/** Population-wide averages of the fox brains' traits, or null with no foxes
+ * alive - same null-vs-zeros reasoning as averageFoxGenes. */
+function averageFoxTraits(foxes) {
+  if (foxes.length === 0) return null
+  const avg = {}
+  for (const key of FOX_TRAIT_KEYS) avg[key] = 0
+  for (const fox of foxes) {
+    const t = computeFoxTraits(fox.brain)
+    for (const key of FOX_TRAIT_KEYS) avg[key] += t[key]
+  }
+  for (const key of FOX_TRAIT_KEYS) avg[key] /= foxes.length
+  return avg
+}
+
 /** Population-wide averages of the rabbits' sense genes, or null with no
  * rabbits alive - same null-vs-zeros reasoning as averageFoxGenes. */
 function averageRabbitGenes(rabbits) {
@@ -1223,6 +1460,7 @@ function sampleTraitHistory(sim) {
     foxMinGen: null,
     foxMaxGen: null,
     foxGenes: averageFoxGenes(foxes),
+    foxTraits: averageFoxTraits(foxes),
     // The warren, as a population-level statistic: how much shelter exists
     // and how much of it is in use right now.
     burrows: sim.burrows.length,

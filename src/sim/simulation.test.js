@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { TILE } from '../worldgen/mapgen.js'
 import { createSimulation, selectCreature, spawnFox, spawnRabbit, stepSimulation, isPlaceable, TICK_MS } from './simulation.js'
 import { INPUT_SIZE, HIDDEN_SIZE, OUTPUT_SIZE } from './brain.js'
+import { FOX_INPUT_SIZE, FOX_HIDDEN_SIZE, FOX_OUTPUT_SIZE } from './foxBrain.js'
 import { FOX_GENE_KEYS } from './fox.js'
 import { RABBIT_GENE_KEYS } from './rabbit.js'
 import { BURROW_BUILD_ENERGY, BURROW_CAPACITY, burrowNetworks } from './burrow.js'
@@ -67,11 +68,39 @@ function foxGenes(overrides = {}) {
   return { ...g, ...overrides }
 }
 
-// A fox built to actually hunt in tests: always hungry for a chase
-// (bloodlust 1), fast enough to close, and easy to see so nothing depends on
-// camouflage unless a test says so.
+// A fox *body* built to actually hunt in tests: fast enough to close, and
+// easy to see so nothing depends on camouflage unless a test says so. What
+// it does with that body is now its brain's call, so most tests pass one of
+// the brains below alongside these genes.
 function hunterGenes(overrides = {}) {
-  return foxGenes({ speed: 1, vision: 1, camouflage: 0, bloodlust: 1, stamina: 1, ...overrides })
+  return foxGenes({ speed: 1, vision: 1, camouflage: 0, stamina: 1, ...overrides })
+}
+
+// A fox brain that ignores its inputs: every output is sigmoid(0) = 0.5, and
+// every gate in runFoxDecisionTick is `> 0.5`, so this fox never chases,
+// tracks, groups, rests or breeds - it just sweeps. The predictable baseline
+// the fox brains below are built from.
+function zeroFoxBrain(overrides = {}) {
+  const brain = {
+    w1: new Float32Array(FOX_INPUT_SIZE * FOX_HIDDEN_SIZE),
+    b1: new Float32Array(FOX_HIDDEN_SIZE),
+    w2: new Float32Array(FOX_HIDDEN_SIZE * FOX_OUTPUT_SIZE),
+    b2: new Float32Array(FOX_OUTPUT_SIZE),
+  }
+  // Output order: chase, sprint, track, group, rest, breed.
+  for (const [idx, value] of Object.entries(overrides)) brain.b2[idx] = value
+  return brain
+}
+
+/** Chases and sprints at anything it can see, and never breeds mid-test. */
+function huntingBrain(overrides = {}) {
+  return zeroFoxBrain({ 0: 10, 1: 10, 5: -10, ...overrides })
+}
+
+/** Sees rabbits and lets them walk past: the replacement for the old
+ * `bloodlust: 0` genes, now that wanting to hunt is a decision. */
+function placidBrain(overrides = {}) {
+  return zeroFoxBrain({ 0: -10, 2: -10, 5: -10, ...overrides })
 }
 
 /** An open square of GRASS ringed by OCEAN, no apples - a plain arena for
@@ -292,7 +321,7 @@ describe('foxes hunting rabbits', () => {
   it('runs down a rabbit that does not flee, and eats it', () => {
     const sim = createSimulation(makeOpenMap(11))
     spawnRabbit(sim, 7, 5, fearlessBrain(), 100)
-    const fox = spawnFox(sim, 3, 5, hunterGenes(), 60)
+    const fox = spawnFox(sim, 3, 5, hunterGenes(), 60, 0, huntingBrain())
     const energyBefore = fox.energy
 
     // Step until the kill rather than for a fixed span, so the assertions
@@ -306,11 +335,12 @@ describe('foxes hunting rabbits', () => {
     expect(fox.feedingRemaining).toBeGreaterThan(0) // stands over the carcass
   })
 
-  it('leaves rabbits alone when it is well fed and has no desire to hunt', () => {
+  it('leaves rabbits alone when its brain does not vote to chase', () => {
     const sim = createSimulation(makeOpenMap(11))
     spawnRabbit(sim, 6, 5, fearlessBrain(), 100)
-    // bloodlust 0 -> only hunts below ~46 energy; this one starts far above it.
-    const fox = spawnFox(sim, 4, 5, hunterGenes({ bloodlust: 0 }), 110)
+    // The body of a killer, the temperament of a bystander: wanting to hunt
+    // is a decision the net makes now, not a gene the fox is stuck with.
+    const fox = spawnFox(sim, 4, 5, hunterGenes(), 110, 0, placidBrain())
 
     runFor(sim, 4000)
 
@@ -322,7 +352,7 @@ describe('foxes hunting rabbits', () => {
   it('cannot pounce on a rabbit it has not closed on yet', () => {
     const sim = createSimulation(makeOpenMap(21))
     spawnRabbit(sim, 16, 10, fearlessBrain(), 100)
-    spawnFox(sim, 2, 10, hunterGenes(), 60)
+    spawnFox(sim, 2, 10, hunterGenes(), 60, 0, huntingBrain())
 
     stepSimulation(sim, TICK_MS)
 
@@ -333,7 +363,7 @@ describe('foxes hunting rabbits', () => {
   it('clears the selection when the selected rabbit is eaten', () => {
     const sim = createSimulation(makeOpenMap(11))
     const rabbit = spawnRabbit(sim, 6, 5, fearlessBrain(), 100)
-    spawnFox(sim, 4, 5, hunterGenes(), 60)
+    spawnFox(sim, 4, 5, hunterGenes(), 60, 0, huntingBrain())
     selectCreature(sim, 'rabbit', rabbit.id)
 
     runFor(sim, 3000)
@@ -349,7 +379,7 @@ describe('rabbits fleeing foxes', () => {
     const sim = createSimulation(makeOpenMap(15))
     // Fearless genome, but PANIC_RADIUS is a hardwired reflex.
     const rabbit = spawnRabbit(sim, 8, 7, fearlessBrain(), 100)
-    spawnFox(sim, 7, 7, hunterGenes({ speed: 0 }), 60)
+    spawnFox(sim, 7, 7, hunterGenes({ speed: 0 }), 60, 0, huntingBrain())
 
     stepSimulation(sim, TICK_MS)
 
@@ -369,7 +399,7 @@ describe('rabbits fleeing foxes', () => {
   it('spots an uncamouflaged fox at a distance, but a camouflaged one can stalk a deaf rabbit', () => {
     const seen = createSimulation(makeOpenMap(15))
     const watchful = spawnRabbit(seen, 10, 7, jumpyBrain(), 100, 0, rabbitGenes({ hearing: 0 }))
-    spawnFox(seen, 5, 7, hunterGenes({ camouflage: 0, speed: 0 }), 60)
+    spawnFox(seen, 5, 7, hunterGenes({ camouflage: 0, speed: 0 }), 60, 0, huntingBrain())
     stepSimulation(seen, TICK_MS)
     expect(watchful.fleeing).toBe(true)
 
@@ -379,7 +409,7 @@ describe('rabbits fleeing foxes', () => {
     // either. Both senses have to miss for an ambush to work now.
     const ambushed = createSimulation(makeOpenMap(15))
     const oblivious = spawnRabbit(ambushed, 10, 7, jumpyBrain(), 100, 0, rabbitGenes({ hearing: 0 }))
-    spawnFox(ambushed, 5, 7, hunterGenes({ camouflage: 1, speed: 0 }), 60)
+    spawnFox(ambushed, 5, 7, hunterGenes({ camouflage: 1, speed: 0 }), 60, 0, huntingBrain())
     stepSimulation(ambushed, TICK_MS)
     expect(oblivious.fleeing).toBe(false)
   })
@@ -387,7 +417,7 @@ describe('rabbits fleeing foxes', () => {
   it('outruns a slow fox once it has bolted, opening the gap', () => {
     const sim = createSimulation(makeOpenMap(31))
     const rabbit = spawnRabbit(sim, 14, 15, jumpyBrain(), 100)
-    const fox = spawnFox(sim, 10, 15, hunterGenes({ speed: 0 }), 60)
+    const fox = spawnFox(sim, 10, 15, hunterGenes({ speed: 0 }), 60, 0, huntingBrain())
     const gapBefore = Math.hypot(rabbit.x - fox.x, rabbit.y - fox.y)
 
     runFor(sim, 2000)
@@ -400,9 +430,9 @@ describe('rabbits fleeing foxes', () => {
 describe('fox pack behaviour', () => {
   it('flags foxes as packing only when a packmate is inside their pack radius', () => {
     const sim = createSimulation(makeOpenMap(31))
-    const loner = spawnFox(sim, 3, 3, foxGenes({ packTendency: 0, speed: 0 }), 90)
-    const packerA = spawnFox(sim, 20, 20, foxGenes({ packTendency: 1, speed: 0 }), 90)
-    const packerB = spawnFox(sim, 27, 24, foxGenes({ packTendency: 1, speed: 0 }), 90)
+    const loner = spawnFox(sim, 3, 3, foxGenes({ packTendency: 0, speed: 0 }), 90, 0, zeroFoxBrain())
+    const packerA = spawnFox(sim, 20, 20, foxGenes({ packTendency: 1, speed: 0 }), 90, 0, zeroFoxBrain())
+    const packerB = spawnFox(sim, 27, 24, foxGenes({ packTendency: 1, speed: 0 }), 90, 0, zeroFoxBrain())
 
     stepSimulation(sim, TICK_MS)
 
@@ -413,8 +443,11 @@ describe('fox pack behaviour', () => {
 
   it('draws pack-minded foxes toward each other while they are not hunting', () => {
     const sim = createSimulation(makeOpenMap(31))
-    const a = spawnFox(sim, 8, 15, foxGenes({ packTendency: 1, speed: 1, bloodlust: 0 }), 90)
-    const b = spawnFox(sim, 22, 15, foxGenes({ packTendency: 1, speed: 1, bloodlust: 0 }), 90)
+    // Sociable brains (group logit +10) in bodies that can keep track of a
+    // packmate 14 tiles off - both halves are needed, which is the point of
+    // the split.
+    const a = spawnFox(sim, 8, 15, foxGenes({ packTendency: 1, speed: 1 }), 90, 0, placidBrain({ 3: 10 }))
+    const b = spawnFox(sim, 22, 15, foxGenes({ packTendency: 1, speed: 1 }), 90, 0, placidBrain({ 3: 10 }))
     const gapBefore = Math.hypot(a.x - b.x, a.y - b.y)
 
     runFor(sim, 4000)
@@ -426,7 +459,7 @@ describe('fox pack behaviour', () => {
 describe('fox energy and reproduction', () => {
   it('burns energy over time and dies once it runs out', () => {
     const sim = createSimulation(makeOpenMap(9))
-    spawnFox(sim, 4, 4, foxGenes(), 1)
+    spawnFox(sim, 4, 4, foxGenes(), 1, 0, zeroFoxBrain())
     expect(sim.foxes).toHaveLength(1)
 
     runFor(sim, 5000)
@@ -435,29 +468,35 @@ describe('fox energy and reproduction', () => {
   })
 
   it('burns energy faster while sprinting after prey than while prowling', () => {
+    // Inside FOX_SPRINT_RANGE, so the burst is actually on - and only two
+    // ticks of it, which is short of closing the gap, so the comparison is
+    // about upkeep rather than about who ate.
     const chasing = createSimulation(makeOpenMap(21))
-    spawnRabbit(chasing, 14, 10, fearlessBrain(), 100)
-    const hunter = spawnFox(chasing, 6, 10, hunterGenes(), 100)
+    spawnRabbit(chasing, 11, 10, fearlessBrain(), 100)
+    const hunter = spawnFox(chasing, 6, 10, hunterGenes(), 100, 0, huntingBrain())
 
     const idling = createSimulation(makeOpenMap(21))
-    const prowler = spawnFox(idling, 6, 10, hunterGenes(), 100)
+    const prowler = spawnFox(idling, 6, 10, hunterGenes(), 100, 0, huntingBrain())
 
-    runFor(chasing, 1000)
-    runFor(idling, 1000)
+    runFor(chasing, 400)
+    runFor(idling, 400)
 
+    expect(chasing.kills).toBe(0)
+    expect(hunter.sprinting).toBe(true)
     expect(hunter.energy).toBeLessThan(prowler.energy)
   })
 
   it('gestates once it is well fed and produces a cub with mutated genes', () => {
     const sim = createSimulation(makeOpenMap(11))
     // fecundity 1 -> breeds at the lowest energy threshold and the shortest
-    // gestation available, which since issue #14 is still 68 seconds.
-    const fox = spawnFox(sim, 5, 5, foxGenes({ fecundity: 1, metabolism: 0 }), 120)
+    // gestation available, which is 30 seconds. Wanting a litter is the
+    // brain's call (breed logit +10) on top of that energy bar.
+    const fox = spawnFox(sim, 5, 5, foxGenes({ fecundity: 1, metabolism: 0 }), 160, 0, zeroFoxBrain({ 5: 10 }))
 
     stepSimulation(sim, TICK_MS)
     expect(fox.gestating).toBe(true)
 
-    runFor(sim, 68000)
+    runFor(sim, 30000)
 
     const cub = sim.foxes.find((f) => f.generation === 1)
     expect(cub).toBeDefined()
@@ -466,11 +505,168 @@ describe('fox energy and reproduction', () => {
   })
 })
 
+describe('foxes hunting by scent', () => {
+  /** A brain that will not chase what it sees but will follow its nose, so
+   * a test can isolate tracking from hunting. */
+  function trackingBrain() {
+    return zeroFoxBrain({ 0: -10, 2: 10, 5: -10 })
+  }
+
+  it('walks toward a rabbit it cannot see, on scent alone', () => {
+    const sim = createSimulation(makeOpenMap(41))
+    // 10 tiles apart with vision 0 (4 tiles of sight, and a nose the same
+    // length as its eyes... which is why the fox's sight is turned right
+    // down and the rabbit is placed outside it): the only thing that can
+    // point this fox at its dinner is the smell.
+    const rabbit = spawnRabbit(sim, 26, 20, fearlessBrain(), 100)
+    const fox = spawnFox(sim, 20, 20, foxGenes({ vision: 1, speed: 0.6 }), 120, 0, trackingBrain())
+    rabbit.x = 30 // 10 tiles: inside a vision-1 fox's nose, outside nothing else
+    const gapBefore = Math.hypot(rabbit.x - fox.x, rabbit.y - fox.y)
+
+    runFor(sim, 4000)
+
+    expect(fox.tracking).toBe(true)
+    expect(Math.hypot(rabbit.x - fox.x, rabbit.y - fox.y)).toBeLessThan(gapBefore)
+  })
+
+  it('smells nothing at all once the rabbit is underground', () => {
+    const sim = createSimulation(makeOpenMap(41))
+    spawnRabbit(sim, 30, 20, burrowingBrain(), 100)
+    const fox = spawnFox(sim, 20, 20, foxGenes({ vision: 1 }), 120, 0, trackingBrain())
+
+    // One tick above ground to confirm the nose works, then the rabbit digs
+    // in and the scent goes with it.
+    stepSimulation(sim, TICK_MS)
+    expect(fox.scentStrength).toBeGreaterThan(0)
+
+    runFor(sim, 2000)
+
+    expect(sim.rabbits[0].burrowId).not.toBeNull()
+    expect(fox.scentStrength).toBe(0)
+    expect(fox.tracking).toBe(false)
+  })
+
+  it('smells a moving rabbit further off than a still one', () => {
+    const strengthFor = (rabbitBrain) => {
+      const sim = createSimulation(makeOpenMap(41))
+      spawnRabbit(sim, 28, 20, rabbitBrain, 100)
+      const fox = spawnFox(sim, 20, 20, foxGenes({ vision: 1 }), 120, 0, trackingBrain())
+      stepSimulation(sim, TICK_MS)
+      return fox.scentStrength
+    }
+    // A bolting rabbit leaves a hot trail; one sitting still barely
+    // registers - the mirror of how a sprinting fox gives itself away to a
+    // rabbit's ears.
+    const running = zeroBrain()
+    running.b2[2] = 10 // run
+    const still = zeroBrain()
+    still.b2[3] = 10 // rest
+    expect(strengthFor(running)).toBeGreaterThan(strengthFor(still))
+  })
+})
+
+describe('foxes lying up', () => {
+  /** Never chases, never tracks, always wants to lie up. */
+  function lazyBrain() {
+    return zeroFoxBrain({ 0: -10, 2: -10, 4: 10, 5: -10 })
+  }
+
+  it('stops moving and burns energy more slowly than a fox on the prowl', () => {
+    const resting = createSimulation(makeOpenMap(15))
+    const sleeper = spawnFox(resting, 7, 7, foxGenes(), 150, 0, lazyBrain())
+
+    const roaming = createSimulation(makeOpenMap(15))
+    const prowler = spawnFox(roaming, 7, 7, foxGenes(), 150, 0, zeroFoxBrain())
+
+    runFor(resting, 6000)
+    runFor(roaming, 6000)
+
+    expect(sleeper.resting).toBe(true)
+    expect(sleeper.x).toBe(7)
+    expect(sleeper.y).toBe(7)
+    expect(sleeper.energy).toBeGreaterThan(prowler.energy)
+  })
+
+  it('gets up anyway once it is genuinely hungry', () => {
+    // FOX_ROUSE_ENERGY: resting finds nothing, so it has to be something a
+    // fox does with reserves rather than instead of eating.
+    const sim = createSimulation(makeOpenMap(15))
+    const fox = spawnFox(sim, 7, 7, foxGenes(), 20, 0, lazyBrain())
+
+    runFor(sim, 1000)
+
+    expect(fox.resting).toBe(false)
+  })
+
+  it('is quieter than a prowling fox, so nearby rabbits carry on grazing', () => {
+    const fleeing = (foxBrain) => {
+      const sim = createSimulation(makeOpenMap(31))
+      // 5 tiles: inside earshot of a fox on the move (10 tiles of hearing
+      // against its noisy legs), outside it for one lying still (3).
+      const rabbit = spawnRabbit(sim, 20, 15, jumpyBrain(), 100, 0, rabbitGenes({ hearing: 0.5 }))
+      spawnFox(sim, 15, 15, foxGenes({ speed: 1, camouflage: 1 }), 150, 0, foxBrain)
+      runFor(sim, 400)
+      return rabbit.fleeing
+    }
+    // Same fox, same distance, both invisible behind full camouflage: the
+    // only difference is whether it is moving around.
+    expect(fleeing(zeroFoxBrain())).toBe(true)
+    expect(fleeing(lazyBrain())).toBe(false)
+  })
+})
+
+describe('fox brains deciding for themselves', () => {
+  it('will not breed on a full belly if its brain votes against it', () => {
+    // Separate arenas: two foxes on one map would be inside each other's
+    // territory (see FOX_TERRITORY_RADIUS) and neither would breed, which
+    // is a different rule than the one this test is about.
+    const willing = createSimulation(makeOpenMap(11))
+    const eager = spawnFox(willing, 5, 5, foxGenes({ fecundity: 1 }), 165, 0, zeroFoxBrain({ 5: 10 }))
+    const refusing = createSimulation(makeOpenMap(11))
+    const unwilling = spawnFox(refusing, 5, 5, foxGenes({ fecundity: 1 }), 165, 0, zeroFoxBrain({ 5: -10 }))
+
+    stepSimulation(willing, TICK_MS)
+    stepSimulation(refusing, TICK_MS)
+
+    expect(eager.gestating).toBe(true)
+    expect(unwilling.gestating).toBe(false)
+  })
+
+  it('passes both halves of itself to a cub: mutated genes and a mutated brain', () => {
+    const sim = createSimulation(makeOpenMap(11))
+    const parent = spawnFox(sim, 5, 5, foxGenes({ fecundity: 1, metabolism: 0 }), 168, 0, zeroFoxBrain({ 5: 10 }))
+
+    stepSimulation(sim, TICK_MS)
+    runFor(sim, 30000)
+
+    const cub = sim.foxes.find((f) => f.generation === 1)
+    expect(cub).toBeDefined()
+    expect(Object.keys(cub.genes).sort()).toEqual([...FOX_GENE_KEYS].sort())
+    expect(cub.brain.w1.length).toBe(parent.brain.w1.length)
+    // Inherited, not shared: mutation has to produce a *copy*, or every fox
+    // on the island would end up pointing at one brain.
+    expect(cub.brain).not.toBe(parent.brain)
+  })
+
+  it('records the fox brains\' average instincts in the trait history', () => {
+    const sim = createSimulation(makeOpenMap(15))
+    spawnFox(sim, 4, 4, foxGenes(), 120, 0, zeroFoxBrain({ 0: 10 }))
+    spawnFox(sim, 11, 11, foxGenes(), 120, 0, zeroFoxBrain({ 0: 10 }))
+
+    runFor(sim, 5200)
+
+    const sample = sim.traitHistory[sim.traitHistory.length - 1]
+    expect(sample.foxTraits).not.toBeNull()
+    expect(sample.foxTraits.aggression).toBeGreaterThanOrEqual(0)
+    expect(sample.foxTraits.aggression).toBeLessThanOrEqual(1)
+  })
+})
+
 describe('trait history with both species', () => {
   it('records fox population and average genes alongside the rabbit traits', () => {
     const sim = createSimulation(makeOpenMap(15))
     spawnRabbit(sim, 4, 4, fearlessBrain(), 100)
-    spawnFox(sim, 11, 11, foxGenes({ speed: 0.25, bloodlust: 0 }), 100)
+    spawnFox(sim, 11, 11, foxGenes({ speed: 0.25 }), 100, 0, placidBrain())
 
     runFor(sim, 5200)
 
@@ -491,7 +687,7 @@ describe('trait history with both species', () => {
   it('records the warren: how many burrows exist and who is in them', () => {
     const sim = createSimulation(makeOpenMap(15))
     spawnRabbit(sim, 7, 7, burrowingBrain(), 100)
-    spawnFox(sim, 9, 7, hunterGenes({ speed: 0 }), 60)
+    spawnFox(sim, 9, 7, hunterGenes({ speed: 0 }), 60, 0, huntingBrain())
 
     runFor(sim, 5200)
 
@@ -514,7 +710,7 @@ describe('rabbits hearing foxes', () => {
     // 9 tiles out: well past PREY_ALERT_RADIUS (6), inside a good pair of
     // ears. The fox is uncamouflaged either way - this is about range.
     const rabbit = spawnRabbit(sim, 19, 15, jumpyBrain(), 100, 0, rabbitGenes({ hearing: 1 }))
-    spawnFox(sim, 10, 15, hunterGenes({ speed: 0.6 }), 60)
+    spawnFox(sim, 10, 15, hunterGenes({ speed: 0.6 }), 60, 0, huntingBrain())
 
     stepSimulation(sim, TICK_MS)
 
@@ -527,7 +723,7 @@ describe('rabbits hearing foxes', () => {
     const detected = (hearing) => {
       const sim = createSimulation(makeOpenMap(31))
       const rabbit = spawnRabbit(sim, 15 + dist, 15, jumpyBrain(), 100, 0, rabbitGenes({ hearing }))
-      spawnFox(sim, 15, 15, hunterGenes({ speed: 0.6 }), 60)
+      spawnFox(sim, 15, 15, hunterGenes({ speed: 0.6 }), 60, 0, huntingBrain())
       stepSimulation(sim, TICK_MS)
       return rabbit.fleeing
     }
@@ -540,7 +736,7 @@ describe('rabbits hearing foxes', () => {
     // what stops a maxed-camouflage lineage from being unanswerable.
     const sim = createSimulation(makeOpenMap(31))
     const rabbit = spawnRabbit(sim, 24, 15, jumpyBrain(), 100, 0, rabbitGenes({ hearing: 1 }))
-    spawnFox(sim, 15, 15, hunterGenes({ camouflage: 1, speed: 1 }), 60) // 9 tiles, loud legs
+    spawnFox(sim, 15, 15, hunterGenes({ camouflage: 1, speed: 1 }), 60, 0, huntingBrain()) // 9 tiles, loud legs
 
     stepSimulation(sim, TICK_MS)
 
@@ -556,7 +752,7 @@ describe('rabbits warning each other', () => {
     // lookout's call.
     const lookout = spawnRabbit(sim, 18, 20, jumpyBrain(), 100, 0, rabbitGenes({ hearing: 1, voice: 1 }))
     const listener = spawnRabbit(sim, 26, 20, jumpyBrain(), 100, 0, rabbitGenes({ hearing: 1, voice: 1 }))
-    spawnFox(sim, 8, 20, hunterGenes({ speed: 1 }), 60)
+    spawnFox(sim, 8, 20, hunterGenes({ speed: 1 }), 60, 0, huntingBrain())
 
     stepSimulation(sim, TICK_MS)
     stepSimulation(sim, TICK_MS) // one tick for the call, one to act on it
@@ -582,7 +778,7 @@ describe('rabbits warning each other', () => {
     const sim = createSimulation(makeOpenMap(61))
     const lookout = spawnRabbit(sim, 18, 30, jumpyBrain(), 100, 0, rabbitGenes({ hearing: 1, voice: 0 }))
     const tooFar = spawnRabbit(sim, 45, 30, jumpyBrain(), 100, 0, rabbitGenes({ hearing: 0, voice: 0 }))
-    spawnFox(sim, 10, 30, hunterGenes({ speed: 1 }), 60)
+    spawnFox(sim, 10, 30, hunterGenes({ speed: 1 }), 60, 0, huntingBrain())
 
     stepSimulation(sim, TICK_MS)
     stepSimulation(sim, TICK_MS)
@@ -597,7 +793,7 @@ describe('burrows', () => {
   it('digs one for 7 energy and drops into it', () => {
     const sim = createSimulation(makeOpenMap(15))
     const rabbit = spawnRabbit(sim, 7, 7, burrowingBrain(), 100)
-    spawnFox(sim, 10, 7, hunterGenes({ speed: 0 }), 60)
+    spawnFox(sim, 10, 7, hunterGenes({ speed: 0 }), 60, 0, huntingBrain())
 
     stepSimulation(sim, TICK_MS)
 
@@ -610,7 +806,7 @@ describe('burrows', () => {
   it('will not dig without enough energy left over to survive doing it', () => {
     const sim = createSimulation(makeOpenMap(15))
     const rabbit = spawnRabbit(sim, 7, 7, burrowingBrain(), 20)
-    spawnFox(sim, 10, 7, hunterGenes({ speed: 0 }), 60)
+    spawnFox(sim, 10, 7, hunterGenes({ speed: 0 }), 60, 0, huntingBrain())
 
     stepSimulation(sim, TICK_MS)
 
@@ -621,7 +817,7 @@ describe('burrows', () => {
   it('cannot be pounced on or even seen while underground', () => {
     const sim = createSimulation(makeOpenMap(15))
     const rabbit = spawnRabbit(sim, 7, 7, burrowingBrain(), 100)
-    const fox = spawnFox(sim, 10, 7, hunterGenes(), 100)
+    const fox = spawnFox(sim, 10, 7, hunterGenes(), 100, 0, huntingBrain())
 
     stepSimulation(sim, TICK_MS)
     expect(rabbit.burrowId).not.toBeNull()
@@ -638,14 +834,17 @@ describe('burrows', () => {
     const sim = createSimulation(makeTestMap())
     // Sitting on the apple tile, hiding from a fox: the apple stays put.
     const rabbit = spawnRabbit(sim, 2, 2, burrowingBrain(), 90)
-    spawnFox(sim, 3, 2, hunterGenes({ speed: 0, bloodlust: 0 }), 60)
+    spawnFox(sim, 3, 2, hunterGenes({ speed: 0 }), 60, 0, placidBrain())
     const appleIdx = 2 * 5 + 2
 
     stepSimulation(sim, TICK_MS)
     expect(rabbit.burrowId).not.toBeNull()
     const energyUnderground = rabbit.energy
 
-    runFor(sim, 3000)
+    // Long enough to cross the (deliberately slow) sheltered depletion
+    // threshold - a rabbit underground burns less than one grazing, but it
+    // still burns.
+    runFor(sim, 12000)
 
     expect(sim.hasApple[appleIdx]).toBe(1)
     expect(rabbit.energy).toBeLessThan(energyUnderground) // starving, not grazing
@@ -656,7 +855,7 @@ describe('burrows', () => {
     // All on one tile, so every one of them is at the entrance the first
     // rabbit digs and capacity is the only thing deciding who gets in.
     for (let i = 0; i < BURROW_CAPACITY + 2; i++) spawnRabbit(sim, 10, 10, burrowingBrain(), 100)
-    spawnFox(sim, 16, 10, hunterGenes({ speed: 0 }), 60)
+    spawnFox(sim, 16, 10, hunterGenes({ speed: 0 }), 60, 0, huntingBrain())
 
     runFor(sim, 2000)
 
@@ -671,7 +870,7 @@ describe('burrows', () => {
     // Far enough out to be allowed to dig (BURROW_MIN_SPACING), close enough
     // that the two holes share a tunnel (BURROW_LINK_RADIUS).
     const latecomer = spawnRabbit(sim, 15, 10, burrowingBrain(), 100)
-    spawnFox(sim, 20, 10, hunterGenes({ speed: 0 }), 60)
+    spawnFox(sim, 20, 10, hunterGenes({ speed: 0 }), 60, 0, huntingBrain())
 
     runFor(sim, 1000)
 
@@ -683,9 +882,9 @@ describe('burrows', () => {
   it('surfaces again once it is hungry enough, since a burrow has no food in it', () => {
     const sim = createSimulation(makeOpenMap(15))
     const rabbit = spawnRabbit(sim, 7, 7, burrowingBrain(), 55)
-    // A fox that is present (so the rabbit digs in) but well fed and frugal
-    // enough that it never crosses its own hunt threshold during the test.
-    spawnFox(sim, 12, 7, hunterGenes({ speed: 0, bloodlust: 0, metabolism: 0 }), 120)
+    // A fox that is present (so the rabbit digs in) but has no interest in
+    // chasing anything, so the test is about hunger and not about predation.
+    spawnFox(sim, 12, 7, hunterGenes({ speed: 0, metabolism: 0 }), 120, 0, placidBrain())
 
     stepSimulation(sim, TICK_MS)
     expect(rabbit.burrowId).not.toBeNull()
@@ -701,7 +900,7 @@ describe('burrows', () => {
   it('frees its slot when a sheltering rabbit starves', () => {
     const sim = createSimulation(makeOpenMap(15))
     const rabbit = spawnRabbit(sim, 7, 7, burrowingBrain(), 100)
-    spawnFox(sim, 9, 7, hunterGenes({ speed: 0 }), 60)
+    spawnFox(sim, 9, 7, hunterGenes({ speed: 0 }), 60, 0, huntingBrain())
     stepSimulation(sim, TICK_MS)
     const burrow = sim.burrows[0]
     expect(burrow.occupants).toContain(rabbit.id)
@@ -719,7 +918,7 @@ describe('burrows', () => {
     const survivors = (brainFor) => {
       const sim = createSimulation(makeOpenMap(25))
       for (let i = 0; i < 5; i++) spawnRabbit(sim, 10 + i, 12, brainFor(), 100, 0, rabbitGenes())
-      spawnFox(sim, 20, 12, hunterGenes(), 100)
+      spawnFox(sim, 20, 12, hunterGenes(), 100, 0, huntingBrain())
       runFor(sim, 20000)
       return sim.rabbits.length
     }
@@ -943,11 +1142,11 @@ describe('foxes in forest cover', () => {
     // vision 1 -> 12 tiles in the open, 6.6 in forest. The rabbit sits at 9.
     const open = createSimulation(makeOpenMap(31))
     spawnRabbit(open, 24, 15, fearlessBrain(), 100)
-    const openFox = spawnFox(open, 15, 15, hunterGenes({ speed: 0 }), 60)
+    const openFox = spawnFox(open, 15, 15, hunterGenes({ speed: 0 }), 60, 0, huntingBrain())
 
     const wooded = createSimulation(makeForestMap(31))
     spawnRabbit(wooded, 24, 15, fearlessBrain(), 100)
-    const woodedFox = spawnFox(wooded, 15, 15, hunterGenes({ speed: 0 }), 60)
+    const woodedFox = spawnFox(wooded, 15, 15, hunterGenes({ speed: 0 }), 60, 0, huntingBrain())
 
     stepSimulation(open, TICK_MS)
     stepSimulation(wooded, TICK_MS)
@@ -959,7 +1158,7 @@ describe('foxes in forest cover', () => {
   it('still sees prey that comes close in the trees', () => {
     const sim = createSimulation(makeForestMap(31))
     spawnRabbit(sim, 19, 15, fearlessBrain(), 100)
-    const fox = spawnFox(sim, 15, 15, hunterGenes({ speed: 0 }), 60)
+    const fox = spawnFox(sim, 15, 15, hunterGenes({ speed: 0 }), 60, 0, huntingBrain())
 
     stepSimulation(sim, TICK_MS)
 

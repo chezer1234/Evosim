@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { FOX_ENERGY_MAX, FOX_GENE_KEYS, createFoxGenes, describeFox, describeFoxStats, foxMenace, foxStats, mutateFoxGenes } from './fox.js'
+import { FOREST_SCENT_FACTOR, FOREST_VISION_FACTOR, FOX_GENE_KEYS, createFoxGenes, describeFox, describeFoxStats, foxMenace, foxStats, mutateFoxGenes } from './fox.js'
 import { mulberry32 } from '../worldgen/mapgen.js'
 
 /** Genes with everything at a neutral 0.5 except the overrides - so each
@@ -27,7 +27,7 @@ describe('createFoxGenes', () => {
   it('keeps founders near their founder mean rather than at the extremes', () => {
     // Otherwise the first fox you place decides the simulation by spawn luck
     // instead of by selection (see FOUNDER_SPREAD).
-    const mean = { speed: 0.34, metabolism: 0.54, fecundity: 0.28, swimming: 0.22 }
+    const mean = { speed: 0.4, metabolism: 0.5, fecundity: 0.36, swimming: 0.22 }
     for (let seed = 0; seed < 25; seed++) {
       for (const [key, value] of Object.entries(createFoxGenes(mulberry32(seed)))) {
         expect(Math.abs(value - (mean[key] ?? 0.5))).toBeLessThanOrEqual(0.34)
@@ -35,21 +35,24 @@ describe('createFoxGenes', () => {
     }
   })
 
-  it('weights founders toward slow, hungry, slow-breeding foxes (issue #14)', () => {
+  it('still weights founders below the midpoint on speed and fecundity', () => {
     // The spawn-time weight that stops a founder pack wiping the rabbits out
-    // before the rabbit gene pool can respond. Averaged over many founders,
-    // since any individual is still drawn across a wide spread.
+    // before the rabbit gene pool can respond (issue #14). Averaged over many
+    // founders, since any individual is still drawn across a wide spread.
+    // Both were nudged back up when the foxes got brains - a founder pack
+    // slow enough that it could not catch anything simply starved - so this
+    // pins the direction rather than the old numbers.
     const totals = { speed: 0, metabolism: 0, fecundity: 0, vision: 0 }
     const n = 400
     for (let seed = 0; seed < n; seed++) {
       const g = createFoxGenes(mulberry32(seed))
       for (const key of Object.keys(totals)) totals[key] += g[key]
     }
-    expect(totals.speed / n).toBeLessThan(0.4)
-    expect(totals.metabolism / n).toBeGreaterThan(0.5)
-    expect(totals.fecundity / n).toBeLessThan(0.4)
-    // Genes the issue didn't ask to weight are untouched.
+    expect(totals.speed / n).toBeLessThan(0.5)
+    expect(totals.fecundity / n).toBeLessThan(0.45)
+    // Genes with no founder weight sit at the midpoint.
     expect(totals.vision / n).toBeCloseTo(0.5, 1)
+    expect(totals.metabolism / n).toBeCloseTo(0.5, 1)
   })
 
   it('still lets mutation carry a lineage past its founder weighting', () => {
@@ -152,22 +155,49 @@ describe('foxStats', () => {
     expect(upper).toBeGreaterThan(lower)
   })
 
-  it('makes a fox expensive enough to run that a kill is not a windfall (issue #14)', () => {
-    // A mid fox has to eat roughly every half-minute to break even; before
-    // the rebalance one carcass funded well over a minute of prowling, which
-    // is what let fox numbers compound until the rabbits were gone.
+  it('gives a fox real runway between meals without making a carcass a windfall', () => {
+    // A mid fox breaks even at roughly a rabbit a minute and a half. That is
+    // deliberately longer than it used to be (about 30 seconds): five
+    // founders scattered on a 64x64 island starved before they ever met a
+    // rabbit, which is a stopwatch rather than a predator/prey dynamic. It
+    // still has to keep eating - a carcass does not fund an afternoon.
     const mid = foxStats(genes())
-    expect(mid.energyPerKill / mid.upkeepPerSec).toBeLessThan(60)
+    const secondsPerKill = mid.energyPerKill / mid.upkeepPerSec
+    expect(secondsPerKill).toBeGreaterThan(45)
+    expect(secondsPerKill).toBeLessThan(150)
   })
 
-  it('keeps litters slow: gestation is over a minute even for the most fecund', () => {
-    expect(foxStats(genes({ fecundity: 1 })).gestationMs).toBeGreaterThan(60000)
-    expect(foxStats(genes({ fecundity: 0 })).gestationMs).toBeGreaterThan(100000)
+  it('makes lying up meaningfully cheaper than prowling', () => {
+    // The payoff for the brain's rest output: waiting out a lean patch has
+    // to actually buy time, or the decision is not a trade-off at all.
+    const s = foxStats(genes())
+    expect(s.restUpkeepFactor).toBeGreaterThan(0)
+    expect(s.restUpkeepFactor).toBeLessThan(0.6)
   })
 
-  it('lets desire to hunt run from "only when starving" to "always"', () => {
-    expect(foxStats(genes({ bloodlust: 0 })).huntBelowEnergy).toBeLessThan(FOX_ENERGY_MAX / 2)
-    expect(foxStats(genes({ bloodlust: 1 })).huntBelowEnergy).toBeGreaterThan(FOX_ENERGY_MAX)
+  it('gives every fox a nose that beats its eyes under the canopy', () => {
+    // Scent is what turns a fox's search into searching rather than
+    // wandering. In the open it reaches slightly *less* far than sight - a
+    // longer nose simply wiped the rabbits out - but woodland costs the fox
+    // 45% of its vision and only 15% of its smell, so under the trees the
+    // nose is the sense that still works. What it costs either way is
+    // accuracy (see SCENT_JITTER in simulation.js).
+    for (const vision of [0, 0.5, 1]) {
+      const s = foxStats(genes({ vision }))
+      expect(s.scentRadius).toBeGreaterThan(s.visionRadius * 0.75)
+      expect(s.scentRadius * FOREST_SCENT_FACTOR).toBeGreaterThan(s.visionRadius * FOREST_VISION_FACTOR)
+    }
+    expect(foxStats(genes({ vision: 1 })).scentRadius).toBeGreaterThan(foxStats(genes({ vision: 0 })).scentRadius)
+  })
+
+  it('keeps litters slower than a rabbit but inside a minute', () => {
+    // Shortened at both ends: at 110-68 seconds a fox line could not answer
+    // a rabbit boom before it had already turned into a bust, so the
+    // populations never cycled - the foxes just drifted down.
+    expect(foxStats(genes({ fecundity: 1 })).gestationMs).toBeLessThan(35000)
+    expect(foxStats(genes({ fecundity: 0 })).gestationMs).toBeLessThan(60000)
+    // Still well over the rabbits' 30 seconds at the reluctant end.
+    expect(foxStats(genes({ fecundity: 0 })).gestationMs).toBeGreaterThan(45000)
   })
 
   it('maps stamina to a longer chase and fecundity to earlier, quicker litters', () => {
@@ -178,7 +208,7 @@ describe('foxStats', () => {
     expect(eager.gestationMs).toBeLessThan(reluctant.gestationMs)
   })
 
-  it('gives pack tendency both a wider pack radius and a chase bonus', () => {
+  it('gives pack instinct both a wider pack radius and a chase bonus', () => {
     const loner = foxStats(genes({ packTendency: 0 }))
     const packer = foxStats(genes({ packTendency: 1 }))
     expect(packer.packRadius).toBeGreaterThan(loner.packRadius)
@@ -208,8 +238,11 @@ describe('foxMenace', () => {
 describe('describeFox', () => {
   it('names the standout gene and reads as a sentence', () => {
     const blurb = describeFox(genes({ speed: 0.98, camouflage: 0.02 }))
-    expect(blurb).toContain('quick over open ground')
-    expect(blurb).toContain('obvious from a distance')
+    expect(blurb).toContain('covers open ground quickly')
+    expect(blurb).toContain('is obvious from a distance')
+    // Verb phrases throughout, so three of them strung together is a
+    // sentence rather than "This fox is breeds readily and…".
+    expect(blurb.startsWith('This fox covers')).toBe(true)
     expect(blurb.endsWith('.')).toBe(true)
   })
 

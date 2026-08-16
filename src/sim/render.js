@@ -17,7 +17,7 @@
 // "swimming" from "walking through a shallow bit" at a glance is the whole
 // point: water is now a place only some creatures can go (see sim/water.js).
 
-import { FOREST_VISION_FACTOR, foxStats } from './fox.js'
+import { FOREST_VISION_FACTOR, FOX_ENERGY_MAX, foxStats } from './fox.js'
 import { TILE } from '../worldgen/mapgen.js'
 import { BURROW_CAPACITY, burrowLinks } from './burrow.js'
 import { motionPose } from './motion.js'
@@ -483,8 +483,6 @@ function drawEnergyBar(ctx, cx, cy, r, tilePx, fraction, color) {
 // see what it's pointed at. Genes show up in the sprite too: camouflage
 // fades it toward the ground, and a hunting fox's eyes light up.
 
-const FOX_ENERGY_MAX = 120 // keep in sync with sim/fox.js
-
 function mix(a, b, t) {
   return a + (b - a) * t
 }
@@ -551,6 +549,11 @@ function drawFoxes(ctx, map, sim, tilePx, ox, oy, startX, startY, endX, endY) {
 
     if (fox.floundering && tilePx >= 6) drawSplashes(ctx, cx, baseY, r * 0.8, pose.stroke)
     if (fox.sprinting && tilePx >= 6) drawSprintStreaks(ctx, cx, cy, r, facing)
+    // The two states the fox's brain added: nose down on a scent it can't
+    // see the source of, and lying up to save energy. Both are decisions,
+    // not consequences, so they're worth being able to read off the map.
+    if (fox.tracking && tilePx >= 6) drawScentTrail(ctx, cx, cy, r, facing, fox.scentStrength)
+    if (fox.resting && tilePx >= 8) drawRestMark(ctx, cx, baseY, r)
     if (fox.feedingRemaining > 0 && tilePx >= 6) drawFeedingMark(ctx, cx, cy, r)
     if (fox.packing && tilePx >= 8) drawPackMark(ctx, cx, cy, r)
     if (selected && tilePx >= 6) drawEnergyBar(ctx, cx, cy, r, tilePx, fox.energy / FOX_ENERGY_MAX, 'rgb(251,146,60)')
@@ -761,8 +764,35 @@ function drawFeedingMark(ctx, cx, cy, r) {
   }
 }
 
+// Faint motes ahead of a fox's nose while it follows a scent: they get
+// brighter as the smell does, so a fox closing on something invisible reads
+// differently from one casting about at the edge of its range.
+function drawScentTrail(ctx, cx, cy, r, heading, strength) {
+  const alpha = 0.25 + 0.5 * Math.min(1, Math.max(0, strength))
+  ctx.fillStyle = `rgba(163,230,53,${alpha.toFixed(2)})`
+  for (const ahead of [1.5, 2.2, 2.9]) {
+    ctx.beginPath()
+    ctx.arc(cx + Math.cos(heading) * r * ahead, cy + Math.sin(heading) * r * ahead, r * 0.1, 0, Math.PI * 2)
+    ctx.fill()
+  }
+}
+
+// Two small bars over a fox that's lying up - the visible sign that it has
+// chosen to burn half rations rather than keep looking.
+function drawRestMark(ctx, cx, cy, r) {
+  ctx.strokeStyle = 'rgba(147,197,253,0.8)'
+  ctx.lineWidth = Math.max(0.5, r * 0.11)
+  for (const [i, scale] of [0.5, 0.34].entries()) {
+    const y = cy - r * (1.5 + i * 0.55)
+    ctx.beginPath()
+    ctx.moveTo(cx + r * (0.5 - scale), y)
+    ctx.lineTo(cx + r * (0.5 + scale), y)
+    ctx.stroke()
+  }
+}
+
 // A small violet arc under a fox that's currently hunting alongside a
-// packmate - the visible half of the pack-tendency gene.
+// packmate - the visible half of the pack-instinct gene.
 function drawPackMark(ctx, cx, cy, r) {
   ctx.strokeStyle = 'rgba(167,139,250,0.85)'
   ctx.lineWidth = Math.max(0.6, r * 0.12)

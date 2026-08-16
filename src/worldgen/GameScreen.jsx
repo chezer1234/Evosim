@@ -4,6 +4,7 @@ import { createSimulation, isPlaceable, selectCreature, spawnFox, spawnRabbit, s
 import { drawSimulation } from '../sim/render.js'
 import { computeTraits, describeEnergyEffects, describeTraits } from '../sim/brainInsight.js'
 import { foxStats } from '../sim/fox.js'
+import { computeFoxTraits, describeFoxBrain, describeFoxDrives } from '../sim/foxInsight.js'
 import { describeRabbitSenses } from '../sim/rabbit.js'
 import RabbitInsights from './RabbitInsights.jsx'
 import FoxInsights from './FoxInsights.jsx'
@@ -78,6 +79,7 @@ function buildInsightsData(sim) {
   } else if (sim.selectedId != null && sim.selectedKind === 'fox') {
     const fox = foxes.find((f) => f.id === sim.selectedId)
     if (fox) {
+      const traits = computeFoxTraits(fox.brain)
       selected = {
         kind: 'fox',
         id: fox.id,
@@ -85,8 +87,14 @@ function buildInsightsData(sim) {
         energy: fox.energy,
         alive: fox.alive,
         genes: fox.genes,
+        brain: fox.brain,
+        traits,
+        blurb: describeFoxBrain(traits),
+        drives: describeFoxDrives(traits),
         hunting: fox.hunting,
         sprinting: fox.sprinting,
+        tracking: fox.tracking,
+        resting: fox.resting,
         packing: fox.packing,
         feeding: fox.feedingRemaining > 0,
         swimming: fox.swimming,
