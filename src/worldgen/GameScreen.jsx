@@ -8,6 +8,11 @@ import PopulationPanel from './PopulationPanel.jsx'
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v))
 
+// Discrete speed multipliers rather than a free slider - a handful of
+// one-click steps is easier to reach for and to "return to normal" from
+// (see issue #10) than dragging a range back to exactly 1x.
+const SPEED_OPTIONS = [1, 2, 4, 8]
+
 /** Snapshot the sim into plain data for the "Brains" panel: the selected
  * rabbit's traits/blurb (if any) plus the population trend history. */
 function buildInsightsData(sim) {
@@ -64,6 +69,17 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
   const dragRef = useRef(null)
   const [zoomPct, setZoomPct] = useState(100)
 
+  // Simulation speed: multiplies the dt handed to stepSimulation each frame,
+  // so "2x" just means "advance the sim twice as far this frame" rather than
+  // running the render loop itself any faster. Paused stops stepping
+  // entirely (rendering - and the coastline wave animation - keeps going).
+  // Lives in a ref for the same reason the sim does: read every frame by the
+  // loop below without re-render churn.
+  const speedRef = useRef(1)
+  const [speed, setSpeed] = useState(1)
+  const pausedRef = useRef(false)
+  const [paused, setPaused] = useState(false)
+
   // Rabbit population sim: lives in a ref (mutated every frame outside
   // React) so the render loop can step it without triggering re-renders.
   // Recreated whenever a new map is generated.
@@ -95,6 +111,8 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
     setPlacing(false)
     placingRef.current = false
     setInsightsData(null)
+    pausedRef.current = false
+    setPaused(false)
   }, [map])
 
   const toggleInsights = useCallback(() => {
@@ -128,6 +146,16 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
   const togglePlacing = useCallback(() => {
     placingRef.current = !placingRef.current
     setPlacing(placingRef.current)
+  }, [])
+
+  const changeSpeed = useCallback((mult) => {
+    speedRef.current = mult
+    setSpeed(mult)
+  }, [])
+
+  const togglePaused = useCallback(() => {
+    pausedRef.current = !pausedRef.current
+    setPaused(pausedRef.current)
   }, [])
 
   const reportZoom = useCallback(() => {
@@ -210,8 +238,12 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
       const dt = now - lastTime
       lastTime = now
       const sim = simRef.current
-      if (sim) {
-        stepSimulation(sim, dt)
+      if (sim && !pausedRef.current) {
+        // Cap the per-frame sim step so a stalled tab/slow frame (dt spikes
+        // after e.g. an alt-tab) can't suddenly dump minutes of simulated
+        // time into one step - clamp first, then apply the speed multiplier
+        // on top of the clamped value.
+        stepSimulation(sim, Math.min(dt, 250) * speedRef.current)
         if (sim.rabbits.length !== lastReportedCountRef.current) {
           lastReportedCountRef.current = sim.rabbits.length
           setRabbitCount(sim.rabbits.length)
@@ -439,6 +471,35 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
             <span>
               Seed <b className="font-mono text-neutral-100 tabular-nums">{map.seed}</b>
             </span>
+            <div className="flex items-center gap-1 border-l border-neutral-800 pl-4">
+              <button
+                type="button"
+                onClick={togglePaused}
+                aria-label={paused ? 'Resume' : 'Pause'}
+                className={
+                  paused
+                    ? 'flex h-7 w-7 items-center justify-center rounded-sm border border-emerald-500 bg-emerald-500/20 font-semibold text-emerald-400 transition'
+                    : 'flex h-7 w-7 items-center justify-center rounded-sm border border-neutral-700 bg-neutral-950 font-semibold text-neutral-200 transition hover:border-emerald-500 hover:text-emerald-400'
+                }
+              >
+                {paused ? '▶' : '⏸'}
+              </button>
+              {SPEED_OPTIONS.map((mult) => (
+                <button
+                  key={mult}
+                  type="button"
+                  onClick={() => changeSpeed(mult)}
+                  aria-label={`${mult}x speed`}
+                  className={
+                    speed === mult
+                      ? 'h-7 min-w-7 rounded-sm border border-emerald-500 bg-emerald-500/20 px-1.5 font-mono text-xs font-semibold text-emerald-400 transition'
+                      : 'h-7 min-w-7 rounded-sm border border-neutral-700 bg-neutral-950 px-1.5 font-mono text-xs font-semibold text-neutral-200 transition hover:border-emerald-500 hover:text-emerald-400'
+                  }
+                >
+                  {mult}×
+                </button>
+              ))}
+            </div>
             <div className="flex items-center gap-1 border-l border-neutral-800 pl-4">
               <button
                 type="button"
