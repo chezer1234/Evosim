@@ -35,6 +35,7 @@ function buildInsightsData(sim) {
         running: rabbit.running,
         resting: rabbit.resting,
         gestating: rabbit.gestating,
+        brain: rabbit.brain,
         traits,
         blurb: describeTraits(traits),
         energyEffects: describeEnergyEffects(traits),

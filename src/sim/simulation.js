@@ -18,11 +18,13 @@ const EAT_GAIN = 10
 const REPRO_ENERGY_THRESHOLD = 75
 const REPRO_COST = 10
 // Not specified by the issue, but a child can't start at full energy for
-// free: the parent only pays REPRO_COST (10), so a full-energy (100) child
-// would net the population +90 energy out of nothing per birth - runs away
-// to an unbounded population fast. Half energy keeps birth a real net cost
-// (parent -10, child +50, so a birth is only "free" once the child forages).
-const CHILD_START_ENERGY = 50
+// free: the parent only pays REPRO_COST (10). Raised from 50 -> 80 because
+// population crashes were common - newborns at 50 were too close to
+// starvation before they'd found their first apple, especially in leaner
+// patches of the map, and a single bad early stretch could wipe out a
+// generation. 80 gives a child real headroom to find food while still
+// costing the parent net energy (parent -10, child +80).
+const CHILD_START_ENERGY = 80
 const GESTATION_MS = 30000
 const REGROW_MS = 45000 // how long an eaten tree takes to bear a new apple
 const TRAIT_SAMPLE_MS = 5000 // how often to snapshot population-wide traits
@@ -230,7 +232,13 @@ function regrowApples(sim) {
 // times a minute.
 function sampleTraitHistory(sim) {
   const rabbits = sim.rabbits
-  if (rabbits.length === 0) return
+  if (rabbits.length === 0) {
+    // Still record the zero so a population-over-time chart shows the
+    // crash landing at 0 instead of just stopping at its last live sample.
+    sim.traitHistory.push({ tSec: sim.clock / 1000, population: 0, minGen: null, maxGen: null, foodDrive: 0, wanderer: 0, boldness: 0, restfulness: 0, broodiness: 0 })
+    if (sim.traitHistory.length > TRAIT_HISTORY_LIMIT) sim.traitHistory.shift()
+    return
+  }
   const sums = { foodDrive: 0, wanderer: 0, boldness: 0, restfulness: 0, broodiness: 0 }
   let minGen = Infinity
   let maxGen = -Infinity
