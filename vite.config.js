@@ -11,4 +11,8 @@ export default defineConfig({
     // which would otherwise land on a port nothing outside this process knows about.
     port: process.env.PORT ? Number(process.env.PORT) : 5173,
   },
+  test: {
+    environment: 'node',
+    include: ['src/**/*.test.js'],
+  },
 })

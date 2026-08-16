@@ -1,47 +1,18 @@
 # Evosim
 
-A single-page evolution simulator. The world generator is in place; the simulation itself is still to be designed.
+**An evolution simulator.** Generate a procedural island, drop in a population, and watch it evolve — tile by tile, generation by generation — as it learns to survive whatever the land throws at it.
 
-**Stack:** React + Vite + Tailwind CSS
+### 🏝️ [Play the live site → evosim.onrender.com](https://evosim.onrender.com)
 
-## World generation
+No install, no sign-up — it just opens and runs in your browser.
 
-`src/worldgen/` holds the procedural map generator: a seeded Perlin fBm island
-with verified lake carving (`mapgen.js`, framework-agnostic), and the
-Home → Settings → Game screens that drive it. Every "Play" rolls a new
-coastline; Settings controls map size, noise detail/feature size/roughness,
-lake count range, and vegetation density, persisted to `localStorage`.
+## What's in it right now
 
-## Development
+- **A new island every time.** Every "Play" generates a fresh, seeded coastline — tune its size, terrain roughness, lake count, and vegetation from Settings.
+- **Rabbits** — the first species. Each one is steered by its own small "brain" that decides when to forage, rest, sprint, or reproduce. Energy drains over time, food restores it, and reproduction passes a mutated copy of a rabbit's brain to its offspring — so populations drift and adapt across generations, entirely from selection pressure rather than anything hand-scripted.
 
-```bash
-npm install
-npm run dev
-```
+More species and interactions are on the way.
 
-Open http://localhost:5173.
+## Contributing
 
-## Build
-
-```bash
-npm run build
-npm run preview
-```
-
-## Deploy (Render)
-
-Deployed as a Render **Static Site**, same pattern as [Traveleria](https://github.com/chezer1234/Traveleria):
-
-1. Go to https://dashboard.render.com and click **New → Static Site**
-2. Connect the `Evosim` GitHub repo
-3. Configure:
-   - **Branch:** `main`
-   - **Build Command:** `npm install && npm run build`
-   - **Publish Directory:** `dist`
-4. Click **Create Static Site**
-
-Every push to `main` triggers a new deploy automatically once the service is connected.
-
-## Status
-
-World/map generation is done. No creatures, evolution, or simulation logic yet.
+Want to poke at the code, run it locally, or send a pull request? See [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) for the technical setup, project structure, testing, and deployment details.
