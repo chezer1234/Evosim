@@ -173,4 +173,22 @@ describe('stepSimulation: reproduction', () => {
     expect(Math.abs(child.x - 1)).toBeLessThanOrEqual(1)
     expect(Math.abs(child.y - 1)).toBeLessThanOrEqual(1)
   })
+
+  it('starts a newborn at 80 energy, not the old 50, so it can survive to its first meal', () => {
+    const sim = createSimulation(makeTestMap())
+    spawnRabbit(sim, 1, 1, reproductiveBrain(), 100)
+    stepSimulation(sim, TICK_MS) // starts gestation
+    // Land the birth on a 1ms final tick (rather than one big jump) so the
+    // same stepSimulation call that spawns the child - which also
+    // immediately steps the child, since it's appended mid-iteration -
+    // advances it by only 1ms. That's short of both the energy-depletion
+    // threshold and a full decision tick, so this test's always-eager-to-
+    // breed brain doesn't get a chance to fire tryReproduce on the child
+    // itself (which would spend REPRO_COST before we get to assert).
+    stepSimulation(sim, 30000 - 1) // GESTATION_MS, just short of completing (gestating only starts ticking down after the first call above)
+    stepSimulation(sim, 1) // completes gestation and spawns the child
+
+    const child = sim.rabbits.find((r) => r.generation === 1)
+    expect(child.energy).toBe(80)
+  })
 })

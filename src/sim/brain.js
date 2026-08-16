@@ -67,7 +67,9 @@ export function think(brain, inputs) {
 
 const MUTATION_RATE = 0.15
 const MUTATION_STDDEV = 0.35
-const WEIGHT_CLAMP = 3
+// Exported so the brain-diagram UI can normalize edge weights against the
+// same ceiling mutation is clamped to, instead of guessing a scale.
+export const WEIGHT_CLAMP = 3
 
 function clamp(v, lo, hi) {
   return Math.min(hi, Math.max(lo, v))

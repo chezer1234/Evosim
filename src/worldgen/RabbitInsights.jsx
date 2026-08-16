@@ -4,6 +4,7 @@
 // how those traits are drifting across generations.
 
 import { TRAIT_META } from '../sim/brainInsight.js'
+import BrainNetworkDiagram from './BrainNetworkDiagram.jsx'
 
 function TraitBar({ label, value, color }) {
   const pct = Math.round(value * 100)
@@ -39,6 +40,42 @@ function Sparkline({ history, traitKey, color }) {
 
 const TREND_KEYS = ['foodDrive', 'boldness', 'broodiness']
 
+const POP_CHART_W = 260
+const POP_CHART_H = 46
+
+/** Population over time, scaled to its own running max (not 0..1 like the
+ * trait sparklines) so a crash down to 0 is as visible as the peak. */
+function PopulationChart({ history }) {
+  if (history.length < 2) return null
+  const values = history.map((s) => s.population)
+  const max = Math.max(1, ...values)
+  const last = values[values.length - 1]
+  const points = history
+    .map((s, i) => {
+      const x = (i / (history.length - 1)) * POP_CHART_W
+      const y = POP_CHART_H - (s.population / max) * POP_CHART_H
+      return `${x.toFixed(1)},${y.toFixed(1)}`
+    })
+    .join(' ')
+  const fillPoints = `0,${POP_CHART_H} ${points} ${POP_CHART_W},${POP_CHART_H}`
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center justify-between text-[11px] text-neutral-400">
+        <span>Population over time</span>
+        <span className="font-mono tabular-nums text-neutral-300">{last}</span>
+      </div>
+      <svg viewBox={`0 0 ${POP_CHART_W} ${POP_CHART_H}`} width="100%" height={POP_CHART_H} preserveAspectRatio="none">
+        <polyline points={fillPoints} fill="rgba(120,214,110,0.15)" stroke="none" />
+        <polyline points={points} fill="none" stroke="rgb(120,214,110)" strokeWidth="1.5" />
+      </svg>
+      <div className="flex justify-between text-[9px] text-neutral-600">
+        <span>0</span>
+        <span>peak {max}</span>
+      </div>
+    </div>
+  )
+}
+
 export default function RabbitInsights({ selected, history, population, generationRange, onClose }) {
   const latest = history[history.length - 1]
 
@@ -59,6 +96,7 @@ export default function RabbitInsights({ selected, history, population, generati
         </p>
         {latest ? (
           <div className="flex flex-col gap-2 rounded-sm border border-neutral-800 bg-neutral-950 p-2">
+            <PopulationChart history={history} />
             {TRAIT_META.filter((m) => TREND_KEYS.includes(m.key)).map((m) => (
               <div key={m.key} className="flex flex-col gap-1">
                 <div className="flex items-center justify-between text-[11px] text-neutral-400">
@@ -96,6 +134,13 @@ export default function RabbitInsights({ selected, history, population, generati
             <li>😴 {selected.energyEffects.rest}</li>
             <li>🐣 {selected.energyEffects.breed}</li>
           </ul>
+          <div className="flex flex-col gap-1 border-t border-neutral-800 pt-3">
+            <h4 className="text-xs font-semibold tracking-wide text-neutral-500 uppercase">Neural net</h4>
+            <p className="text-[10px] text-neutral-600">Green = pulls toward, red = pulls away. Brighter/thicker = stronger. Hover a line or dot for its exact weight.</p>
+            <div className="rounded-sm border border-neutral-800 bg-neutral-950 p-1">
+              <BrainNetworkDiagram brain={selected.brain} />
+            </div>
+          </div>
         </section>
       ) : (
         <p className="border-t border-neutral-800 pt-4 text-[11px] text-neutral-600">Click a rabbit on the map to see its brain.</p>
