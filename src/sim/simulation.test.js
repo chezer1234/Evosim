@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { TILE } from '../worldgen/mapgen.js'
-import { createSimulation, selectCreature, spawnFox, spawnRabbit, stepSimulation, isPlaceable, TICK_MS } from './simulation.js'
+import { createSimulation, islandPopulations, selectCreature, spawnFox, spawnRabbit, stepSimulation, isPlaceable, TICK_MS } from './simulation.js'
+import { analyseWaters, labelIslands, SHALLOW_TILES } from '../worldgen/islands.js'
 import { INPUT_SIZE, HIDDEN_SIZE, OUTPUT_SIZE } from './brain.js'
 import { FOX_INPUT_SIZE, FOX_HIDDEN_SIZE, FOX_OUTPUT_SIZE } from './foxBrain.js'
 import { FOX_GENE_KEYS } from './fox.js'
@@ -50,6 +51,16 @@ function jumpyBrain() {
 function burrowingBrain(overrides = {}) {
   const brain = zeroBrain()
   brain.b2[7] = 10
+  for (const [idx, value] of Object.entries(overrides)) brain.b2[idx] = value
+  return brain
+}
+
+// A rabbit that wanders: searchDrive pinned high, so with nothing in sight it
+// sweeps the map on rolling random headings rather than sitting still like
+// zeroBrain does. What an explorer looks like, in other words.
+function roamingBrain(overrides = {}) {
+  const brain = zeroBrain()
+  brain.b2[5] = 10
   for (const [idx, value] of Object.entries(overrides)) brain.b2[idx] = value
   return brain
 }
@@ -1073,6 +1084,125 @@ describe('swimming', () => {
 
     expect(fox.alive).toBe(false)
     expect(sim.drownings).toBe(1)
+  })
+})
+
+describe('crossing to another island', () => {
+  /**
+   * Two islands in one sea, `gap` tiles of water apart, with the real shelf
+   * analysis run over them - so what is crossable here is decided by the same
+   * code the generated worlds use (see worldgen/islands.js), not by a flag
+   * set for the test.
+   */
+  function makeArchipelago(size, gap) {
+    const tileType = new Uint8Array(size * size).fill(TILE.OCEAN)
+    const westEnd = 3
+    const eastStart = westEnd + gap + 1
+    for (let y = 2; y < size - 2; y++) {
+      for (let x = 1; x <= westEnd; x++) tileType[y * size + x] = TILE.GRASS
+      for (let x = eastStart; x < size - 1; x++) tileType[y * size + x] = TILE.GRASS
+    }
+    const { landId, islands } = labelIslands(tileType, size)
+    const waters = analyseWaters(tileType, landId, size, SHALLOW_TILES, islands.length)
+    for (const island of islands) {
+      island.notable = true
+      island.label = island.id + 1
+    }
+    return {
+      size,
+      tileType,
+      canHaveApple: new Uint8Array(size * size),
+      landId,
+      islands,
+      shallow: waters.shallow,
+      straits: waters.straits,
+      islandGroup: waters.group,
+      groupCount: waters.groupCount,
+      westEnd,
+      eastStart,
+    }
+  }
+
+  /** Did anything of this species end up on the far island? */
+  function reachedEast(sim, map) {
+    return sim.rabbits.concat(sim.foxes).some((c) => c.alive && c.x >= map.eastStart)
+  }
+
+  it('is possible for a rabbit whose swim gene has reached the top of its range', () => {
+    const map = makeArchipelago(21, 4)
+    const sim = createSimulation(map)
+    // Six of them, because a crossing depends on a search heading pointing
+    // out to sea at some point - one rabbit is a coin toss, a warren is not.
+    for (let i = 0; i < 6; i++) {
+      spawnRabbit(sim, map.westEnd, 5 + i * 2, roamingBrain(), 100, 0, rabbitGenes({ swimming: 1 }))
+    }
+
+    runFor(sim, 90000)
+
+    expect(reachedEast(sim, map)).toBe(true)
+  })
+
+  it('is impossible for a rabbit that can only manage a lake', () => {
+    const map = makeArchipelago(21, 4)
+    const sim = createSimulation(map)
+    for (let i = 0; i < 6; i++) {
+      // Comfortably able to swim - and still stuck on its own island.
+      spawnRabbit(sim, map.westEnd, 5 + i * 2, roamingBrain(), 100, 0, rabbitGenes({ swimming: 0.5 }))
+    }
+
+    runFor(sim, 90000)
+
+    expect(reachedEast(sim, map)).toBe(false)
+    expect(sim.rabbits.every((r) => !r.swimming)).toBe(true)
+  })
+
+  it('is impossible for anything once the channel is wide enough to be open sea', () => {
+    // 12 tiles of water: both coasts have a shelf, but there is deep water in
+    // between, and deep water is a wall to every gene there is.
+    const map = makeArchipelago(29, 12)
+    const sim = createSimulation(map)
+    for (let i = 0; i < 6; i++) {
+      spawnRabbit(sim, map.westEnd, 5 + i * 2, roamingBrain(), 100, 0, rabbitGenes({ swimming: 1 }))
+    }
+
+    runFor(sim, 90000)
+
+    expect(map.groupCount).toBe(2) // the terrain says so too
+    expect(reachedEast(sim, map)).toBe(false)
+  })
+
+  it('leaves an island foxless until a fox evolves the same gene', () => {
+    const map = makeArchipelago(21, 4)
+    const landlocked = createSimulation(map)
+    for (let i = 0; i < 4; i++) {
+      spawnFox(landlocked, map.westEnd, 5 + i * 2, hunterGenes({ swimming: 0.5 }), 100, 0, placidBrain())
+    }
+    runFor(landlocked, 90000)
+    expect(reachedEast(landlocked, map)).toBe(false)
+
+    const seagoing = createSimulation(map)
+    for (let i = 0; i < 4; i++) {
+      spawnFox(seagoing, map.westEnd, 5 + i * 2, hunterGenes({ swimming: 1 }), 100, 0, placidBrain())
+    }
+    runFor(seagoing, 90000)
+    expect(reachedEast(seagoing, map)).toBe(true)
+  })
+
+  it('reports which island each population is on', () => {
+    const map = makeArchipelago(21, 4)
+    const sim = createSimulation(map)
+    spawnRabbit(sim, 2, 5, zeroBrain(), 100, 0, rabbitGenes({ swimming: 0 }))
+    spawnRabbit(sim, 2, 7, zeroBrain(), 100, 0, rabbitGenes({ swimming: 0 }))
+    spawnFox(sim, map.eastStart + 1, 6, hunterGenes({ swimming: 0 }), 100)
+
+    const spread = islandPopulations(sim)
+
+    expect(spread.islands.length).toBe(2)
+    expect(spread.colonised).toBe(2)
+    expect(spread.atSea).toBe(0)
+    const west = spread.islands.find((i) => i.id === map.landId[5 * map.size + 2])
+    expect(west.rabbits).toBe(2)
+    expect(west.foxes).toBe(0)
   })
 })
 

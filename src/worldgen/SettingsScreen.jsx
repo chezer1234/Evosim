@@ -1,4 +1,5 @@
 import Slider from './Slider.jsx'
+import { WORLD_PRESETS, matchingPreset } from './mapgen.js'
 
 function Group({ title, children }) {
   return (
@@ -9,7 +10,45 @@ function Group({ title, children }) {
   )
 }
 
-export default function SettingsScreen({ settings, onChange, onReset, onBack, onPlay }) {
+/** The four worlds worth having as one tap. Size and island count are one
+ *  decision, not two: a 64-tile map has nowhere to put a second island, and a
+ *  224-tile map with one island on it is mostly sea. */
+function WorldPresets({ settings, onChange }) {
+  const active = matchingPreset(settings)
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+        {WORLD_PRESETS.map((preset) => (
+          <button
+            key={preset.key}
+            type="button"
+            onClick={() => onChange(preset.settings)}
+            aria-pressed={active === preset.key}
+            className={`flex min-h-11 flex-col items-start gap-0.5 rounded-sm border px-3 py-2 text-left transition ${
+              active === preset.key
+                ? 'border-emerald-500 bg-emerald-500/15 text-emerald-300'
+                : 'border-neutral-700 bg-neutral-950 text-neutral-200 hover:border-emerald-500 hover:text-emerald-400'
+            }`}
+          >
+            <span className="text-sm font-semibold">
+              {preset.label}{' '}
+              <span className="font-mono text-xs text-neutral-500">
+                {preset.settings.size}×{preset.settings.size}
+              </span>
+            </span>
+            <span className="text-xs text-neutral-500">{preset.hint}</span>
+          </button>
+        ))}
+      </div>
+      <p className="text-xs text-neutral-500">
+        Bigger worlds put real water between populations. Only a creature whose swim gene has evolved near the top of
+        its range can cross a narrow channel to the next island - everything else stays where it was born.
+      </p>
+    </div>
+  )
+}
+
+export default function SettingsScreen({ settings, onChange, onChangeMany, onReset, onBack, onPlay }) {
   return (
     <main className="safe-x safe-b min-h-svh bg-neutral-950 px-4 py-6 text-neutral-100 sm:px-6 sm:py-10">
       <div className="mx-auto flex max-w-2xl flex-col gap-6 sm:gap-8">
@@ -26,17 +65,53 @@ export default function SettingsScreen({ settings, onChange, onReset, onBack, on
           </button>
         </div>
 
-        <Group title="Terrain">
+        <Group title="World">
+          <WorldPresets settings={settings} onChange={onChangeMany} />
           <Slider
             label="Map size"
-            hint="Number of tiles along each edge of the island."
+            hint="Number of tiles along each edge of the world."
             value={settings.size}
             min={24}
-            max={140}
-            step={2}
+            max={256}
+            step={8}
             format={(v) => `${v}×${v}`}
             onChange={(v) => onChange('size', v)}
           />
+          <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
+            <Slider
+              label="Min islands"
+              value={settings.minIslands}
+              min={1}
+              max={12}
+              step={1}
+              onChange={(v) => onChange('minIslands', v)}
+            />
+            <Slider
+              label="Max islands"
+              value={settings.maxIslands}
+              min={1}
+              max={12}
+              step={1}
+              onChange={(v) => onChange('maxIslands', v)}
+            />
+          </div>
+          <p className="text-xs text-neutral-500">
+            Each world rolls an island count in this range. They come out smaller the more there are, and some pairs
+            land close enough to swim between.
+          </p>
+          <Slider
+            label="Climate range"
+            hint="How far the world runs from arctic at the top of the map to desert at the bottom. At zero it is one temperate climate everywhere."
+            value={settings.climate}
+            min={0}
+            max={1}
+            step={0.05}
+            format={(v) => `${Math.round(v * 100)}%`}
+            onChange={(v) => onChange('climate', v)}
+          />
+        </Group>
+
+        <Group title="Terrain">
           <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
             <Slider
               label="Detail levels"
@@ -88,7 +163,10 @@ export default function SettingsScreen({ settings, onChange, onReset, onBack, on
               onChange={(v) => onChange('maxLakes', v)}
             />
           </div>
-          <p className="text-xs text-neutral-500">Each new map rolls a random lake count in this range.</p>
+          <p className="text-xs text-neutral-500">
+            Every island rolls its own lake count in this range, so a world of six islands has six sets of lakes rather
+            than sharing one.
+          </p>
         </Group>
 
         <Group title="Life">

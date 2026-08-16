@@ -10,8 +10,8 @@ export default function HomeScreen({ onPlay, onOpenSettings }) {
         <p className="text-[11px] tracking-[0.16em] text-neutral-500 uppercase sm:text-xs">An evolution simulator</p>
         <h1 className="font-serif text-4xl font-semibold tracking-tight text-neutral-50 sm:text-6xl">Evosim</h1>
         <p className="mt-2 mb-8 max-w-md text-sm text-neutral-400 sm:text-base">
-          Chart a new island, drop in a population, and watch generations evolve to survive whatever the land throws
-          at them.
+          Chart a new world - one island, or an archipelago of them - drop in a population, and watch generations
+          evolve to survive whatever the land throws at them.
         </p>
         <div className="flex w-full max-w-xs flex-col justify-center gap-3 sm:max-w-none sm:flex-row sm:flex-wrap">
           <button

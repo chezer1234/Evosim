@@ -98,7 +98,7 @@ function PopulationChart({ history }) {
 /** `mapInfo` carries the map's size/lakes/seed - shown here only when the
  * caller has nowhere else to put them, which on a compact screen is the case:
  * the phone toolbar has room for the live counts and nothing more. */
-export default function PopulationPanel({ population, foxPopulation, kills, burrows, sheltered, swimmers, drownings, history, generationRange, foxGenerationRange, mapInfo, onClose }) {
+export default function PopulationPanel({ population, foxPopulation, kills, burrows, sheltered, swimmers, seafarers = 0, islands = 1, colonised = 0, atSea = 0, islandRows = [], drownings, history, generationRange, foxGenerationRange, mapInfo, onClose }) {
   const latest = history[history.length - 1]
   const hasFoxTrend = history.some((s) => s.foxGenes)
   const hasFoxInstinctTrend = history.some((s) => s.foxTraits)
@@ -132,8 +132,33 @@ export default function PopulationPanel({ population, foxPopulation, kills, burr
           sim/water.js), so this line is where you watch it arrive. */}
       <p className="text-xs text-neutral-400">
         🌊 {swimmers} can swim
+        {seafarers ? ` · ${seafarers} can cross the sea` : ''}
         {drownings ? ` · ${drownings} drowned` : ''}
       </p>
+      {/* On a world of several islands, the number that matters: how many of
+          them anything actually lives on. Populations only diverge while they
+          are apart, and a lineage crossing a channel is the moment two of
+          them stop being separate (see sim/water.js). */}
+      {islands > 1 ? (
+        <div className="flex flex-col gap-1 rounded-sm border border-neutral-800 bg-neutral-950 p-2">
+          <p className="text-xs text-neutral-400">
+            🏝 {colonised} of {islands} islands settled
+            {atSea ? ` · ${atSea} at sea` : ''}
+          </p>
+          <div className="flex flex-col gap-0.5">
+            {islandRows.map((row) => (
+              <div key={row.id} className="flex items-center justify-between font-mono text-[10px] text-neutral-500 tabular-nums">
+                <span>island {row.label}</span>
+                <span>
+                  <span className="text-emerald-400">🐇 {row.rabbits}</span>
+                  <span className="text-neutral-700"> · </span>
+                  <span className={row.foxes ? 'text-orange-400' : 'text-neutral-700'}>🦊 {row.foxes}</span>
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
       {latest ? (
         <div className="flex flex-col gap-2 rounded-sm border border-neutral-800 bg-neutral-950 p-2">
           <PopulationChart history={history} />
@@ -184,6 +209,11 @@ export default function PopulationPanel({ population, foxPopulation, kills, burr
           <span>
             Lakes <b className="font-mono text-neutral-300 tabular-nums">{mapInfo.lakeCount}</b>
           </span>
+          {mapInfo.islandCount > 1 ? (
+            <span>
+              Islands <b className="font-mono text-neutral-300 tabular-nums">{mapInfo.islandCount}</b>
+            </span>
+          ) : null}
           <span>
             Seed <b className="font-mono text-neutral-300 tabular-nums">{mapInfo.seed}</b>
           </span>

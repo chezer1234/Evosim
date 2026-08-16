@@ -27,8 +27,15 @@ import { computeFoxTraits } from './foxInsight.js'
 import { FOREST_SCENT_FACTOR, FOREST_VISION_FACTOR, FOX_ENERGY_MAX, FOX_GENE_KEYS, createFoxGenes, foxStats, mutateFoxGenes } from './fox.js'
 import { RABBIT_GENE_KEYS, alarmReach, createRabbitGenes, mutateRabbitGenes, rabbitStats } from './rabbit.js'
 import { HOP, SWIM, advanceMotion, attachMotion, beginMove, teleportMotion } from './motion.js'
-import { FLOUNDER_DRAIN_FACTOR, FLOUNDER_SPEED_FACTOR, isWaterTile, towardNearestLand } from './water.js'
-import { TILE } from '../worldgen/mapgen.js'
+import {
+  canEnterTile,
+  FLOUNDER_DRAIN_FACTOR,
+  FLOUNDER_SPEED_FACTOR,
+  isWaterTile,
+  towardNearestLand,
+  waterDrainFactor,
+} from './water.js'
+import { hasCover, TILE } from '../worldgen/mapgen.js'
 import {
   BURROW_BUILD_ENERGY,
   BURROW_SENSE_RADIUS,
@@ -239,6 +246,9 @@ export function createSimulation(map) {
     burrows: [],
     hasApple: map.canHaveApple.slice(),
     regrowAt: new Float32Array(map.size * map.size).fill(-1),
+    // Tiles waiting on a new apple, so regrowth costs a walk of what was
+    // eaten rather than a sweep of the whole world (see regrowApples).
+    regrowQueue: [],
     clock: 0,
     // Selection is per-species: ids are only unique within their own list,
     // so the kind is part of the identity.
@@ -538,7 +548,9 @@ function rabbitScentFactor(map, rabbit) {
   // the same discount on its nose, the trees stopped being a refuge the
   // moment foxes could smell - and a refuge is the thing that decides
   // whether a prey population can survive a bad few minutes at all.
-  if (map.tileType[rabbit.y * map.size + rabbit.x] === TILE.FOREST) factor *= FOREST_SCENT_FACTOR
+  // Any biome with real cover, not just the broadleaf woods: a warren that
+  // moves north into the pines keeps the benefit (see worldgen/biomes.js).
+  if (hasCover(map.tileType[rabbit.y * map.size + rabbit.x])) factor *= FOREST_SCENT_FACTOR
   return factor
 }
 
@@ -607,19 +619,13 @@ function stepEveryTicks(map, rabbit, running) {
 }
 
 /**
- * Can this rabbit put itself on that tile? Terrain first, then the swim gene:
- * a rabbit that cannot swim treats a lake shore as solid, which is what turns
- * water into a barrier for some lineages and a road for others.
- *
- * The gate is on *entering* water, not on being in it. Something already out
- * of its depth has to be able to move through water to reach a bank at all -
- * gating that too would pin a floundering creature in place until it drowned,
- * which is a trap rather than a mechanic.
+ * Can this rabbit put itself on that tile? The whole rule lives in
+ * canEnterTile (see ./water.js): a lake shore is solid to anything that
+ * cannot swim, the shelf between two close islands is solid to anything short
+ * of a real open-water swimmer, and deep sea is solid to everything.
  */
 function canRabbitEnter(sim, rabbit, x, y) {
-  if (!isPlaceable(sim.map, x, y)) return false
-  if (!isWaterTile(sim.map, x, y)) return true
-  return rabbit.senses.canSwim || isWaterTile(sim.map, rabbit.x, rabbit.y)
+  return canEnterTile(sim.map, x, y, rabbit.senses, isWaterTile(sim.map, rabbit.x, rabbit.y))
 }
 
 function attemptStep(sim, rabbit, dirX, dirY, durationMs) {
@@ -674,6 +680,7 @@ function tryEat(sim, rabbit) {
   if (map.canHaveApple[idx] && hasApple[idx]) {
     hasApple[idx] = 0
     regrowAt[idx] = sim.clock + REGROW_MS
+    sim.regrowQueue.push(idx)
     rabbit.energy = Math.min(ENERGY_MAX, rabbit.energy + EAT_GAIN)
   }
 }
@@ -700,21 +707,35 @@ const NEIGHBOR_OFFSETS = [
   [1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1],
 ]
 
+/**
+ * A neighbouring tile to be born onto - dry land for preference.
+ *
+ * Dry land *for preference* matters more than it sounds now that a world can
+ * have a lake on every island: a newborn dropped in water it hasn't the gene
+ * for flounders and usually drowns, so a warren living along a shoreline was
+ * quietly losing a chunk of every generation to the nearest lake. Water is
+ * still the fallback, because a parent that is itself swimming has to give
+ * birth somewhere.
+ */
+function birthTileNear(map, x, y) {
+  let wet = null
+  for (const [dx, dy] of NEIGHBOR_OFFSETS) {
+    const nx = x + dx
+    const ny = y + dy
+    if (!isPlaceable(map, nx, ny)) continue
+    if (!isWaterTile(map, nx, ny)) return [nx, ny]
+    if (!wet) wet = [nx, ny]
+  }
+  return wet ?? [x, y]
+}
+
 function finishGestation(sim, rabbit) {
   rabbit.gestating = false
   const childBrain = mutateBrain(rabbit.brain, Math.random)
   const childGenes = mutateRabbitGenes(rabbit.genes, Math.random)
   const childGen = rabbit.generation + 1
-  for (const [dx, dy] of NEIGHBOR_OFFSETS) {
-    const nx = rabbit.x + dx
-    const ny = rabbit.y + dy
-    if (isPlaceable(sim.map, nx, ny)) {
-      spawnRabbit(sim, nx, ny, childBrain, CHILD_START_ENERGY, childGen, childGenes)
-      return
-    }
-  }
-  // No free neighboring tile - fall back to the parent's own tile.
-  spawnRabbit(sim, rabbit.x, rabbit.y, childBrain, CHILD_START_ENERGY, childGen, childGenes)
+  const [nx, ny] = birthTileNear(sim.map, rabbit.x, rabbit.y)
+  spawnRabbit(sim, nx, ny, childBrain, CHILD_START_ENERGY, childGen, childGenes)
 }
 
 // ============================ Going to ground ============================
@@ -1053,7 +1074,12 @@ function stepRabbit(sim, rabbit, dtMs) {
   // scale - a rabbit asleep in a burrow burns less than one out grazing,
   // which is what stops a warren sheltering from a permanent fox presence
   // from quietly starving itself.
-  const swimDrain = rabbit.floundering ? FLOUNDER_DRAIN_FACTOR : rabbit.swimming ? rabbit.senses.swimDrainFactor : 1
+  // A sea crossing costs more again than the same distance of lake (see
+  // OCEAN_DRAIN_FACTOR), which is what makes migrating between islands a
+  // gamble with a lineage's energy rather than a free stroll.
+  const swimDrain =
+    (rabbit.floundering ? FLOUNDER_DRAIN_FACTOR : rabbit.swimming ? rabbit.senses.swimDrainFactor : 1) *
+    (rabbit.swimming ? waterDrainFactor(sim.map, rabbit.x, rabbit.y) : 1)
   const effort = rabbit.burrowId != null ? ENERGY_DEPLETE_SHELTERED_MS : rabbit.running ? ENERGY_DEPLETE_RUN_MS : ENERGY_DEPLETE_NORMAL_MS
   const threshold = effort / swimDrain
   while (rabbit.energyAccum >= threshold) {
@@ -1095,12 +1121,11 @@ function stepRabbit(sim, rabbit, dtMs) {
 function tryFoxStep(sim, fox, dirX, dirY, stats, durationMs) {
   const nx = fox.x + dirX
   const ny = fox.y + dirY
-  if (!isPlaceable(sim.map, nx, ny)) return false
   // The same waterline the rabbits face (see canRabbitEnter): a landlocked
-  // fox breaks off at the shore, which is what a swimming rabbit is buying.
-  // And the same exemption - already being in the water is not a reason to
-  // be stuck in it.
-  if (isWaterTile(sim.map, nx, ny) && !stats.canSwim && !isWaterTile(sim.map, fox.x, fox.y)) return false
+  // fox breaks off at the shore, which is what a swimming rabbit is buying,
+  // and a fox that cannot cross a channel is one an island's warren never
+  // meets.
+  if (!canEnterTile(sim.map, nx, ny, stats, isWaterTile(sim.map, fox.x, fox.y))) return false
   fox.x = nx
   fox.y = ny
   beginMove(fox, nx, ny, durationMs, isWaterTile(sim.map, nx, ny) ? SWIM : HOP)
@@ -1181,16 +1206,8 @@ function finishFoxGestation(sim, fox) {
   const cubGenes = mutateFoxGenes(fox.genes, Math.random)
   const cubBrain = mutateFoxBrain(fox.brain, Math.random)
   const cubGen = fox.generation + 1
-  for (const [dx, dy] of NEIGHBOR_OFFSETS) {
-    const nx = fox.x + dx
-    const ny = fox.y + dy
-    if (isPlaceable(sim.map, nx, ny)) {
-      const cub = spawnFox(sim, nx, ny, cubGenes, FOX_CUB_ENERGY, cubGen, cubBrain)
-      cub.nextLitterAt = sim.clock + FOX_LITTER_RECOVERY_MS
-      return
-    }
-  }
-  const cub = spawnFox(sim, fox.x, fox.y, cubGenes, FOX_CUB_ENERGY, cubGen, cubBrain)
+  const [nx, ny] = birthTileNear(sim.map, fox.x, fox.y)
+  const cub = spawnFox(sim, nx, ny, cubGenes, FOX_CUB_ENERGY, cubGen, cubBrain)
   cub.nextLitterAt = sim.clock + FOX_LITTER_RECOVERY_MS
 }
 
@@ -1260,7 +1277,7 @@ function runFoxDecisionTick(sim, fox) {
   // the fox's own sightlines the trees are blocking. Its nose is unaffected:
   // trees block sightlines, not smells, which is what stops woodland from
   // being a place rabbits are simply safe.
-  const inForest = sim.map.tileType[fox.y * sim.map.size + fox.x] === TILE.FOREST
+  const inForest = hasCover(sim.map.tileType[fox.y * sim.map.size + fox.x])
   const visionRadius = stats.visionRadius * (inForest ? FOREST_VISION_FACTOR : 1)
   const prey = findNearestPrey(sim, fox, visionRadius)
   const scent = senseScent(sim, fox, stats.scentRadius)
@@ -1356,7 +1373,9 @@ function stepFox(sim, fox, dtMs) {
   // fraction of it - the payoff for a decision its brain made and could just
   // as easily evolve out of - and one in the water burns more, whether it is
   // swimming properly or out of its depth.
-  const swimDrain = fox.floundering ? FLOUNDER_DRAIN_FACTOR : fox.swimming ? stats.swimUpkeepMultiplier : 1
+  const swimDrain =
+    (fox.floundering ? FLOUNDER_DRAIN_FACTOR : fox.swimming ? stats.swimUpkeepMultiplier : 1) *
+    (fox.swimming ? waterDrainFactor(sim.map, fox.x, fox.y) : 1)
   const effort = fox.sprinting ? stats.sprintUpkeepMultiplier : fox.resting ? stats.restUpkeepFactor : 1
   fox.energy -= stats.upkeepPerSec * effort * swimDrain * (dtMs / 1000)
   if (fox.energy <= 0) {
@@ -1384,14 +1403,25 @@ function stepFox(sim, fox, dtMs) {
   advanceMotion(fox, dtMs)
 }
 
+// Only the trees that have actually been eaten are waiting to regrow, so
+// they are kept as a list rather than found by sweeping the map every frame -
+// on a 224-tile world that sweep was fifty thousand checks a frame to notice
+// a handful of apples.
 function regrowApples(sim) {
-  const { map, hasApple, regrowAt } = sim
-  for (let i = 0; i < hasApple.length; i++) {
-    if (!hasApple[i] && map.canHaveApple[i] && regrowAt[i] >= 0 && sim.clock >= regrowAt[i]) {
-      hasApple[i] = 1
-      regrowAt[i] = -1
+  const queue = sim.regrowQueue
+  if (!queue.length) return
+  const { hasApple, regrowAt } = sim
+  let keep = 0
+  for (let i = 0; i < queue.length; i++) {
+    const idx = queue[i]
+    if (regrowAt[idx] >= 0 && sim.clock >= regrowAt[idx]) {
+      hasApple[idx] = 1
+      regrowAt[idx] = -1
+    } else if (regrowAt[idx] >= 0) {
+      queue[keep++] = idx
     }
   }
+  queue.length = keep
 }
 
 // Snapshot population-wide average traits every TRAIT_SAMPLE_MS, so the UI
@@ -1493,6 +1523,44 @@ function sampleTraitHistory(sim) {
 
   sim.traitHistory.push(sample)
   if (sim.traitHistory.length > TRAIT_HISTORY_LIMIT) sim.traitHistory.shift()
+}
+
+/**
+ * Who is living on which landmass right now.
+ *
+ * This is the number a world of several islands exists to produce: two
+ * warrens on two islands are two populations, evolving apart, and a fox
+ * population that never crossed the channel is a fox population that island's
+ * rabbits will never meet. Anything currently in the water is counted against
+ * the island it is swimming from (its tile's landId is -1, so it lands in
+ * `atSea` instead), which is how a crossing in progress shows up.
+ *
+ * @returns {{islands: Array<{id:number, area:number, cx:number, cy:number,
+ *   rabbits:number, foxes:number}>, atSea:number, colonised:number}}
+ */
+export function islandPopulations(sim) {
+  const { map } = sim
+  if (!map.islands || !map.landId) return { islands: [], atSea: 0, colonised: 0 }
+  const byId = new Map()
+  for (const island of map.islands) {
+    if (island.notable === false) continue
+    byId.set(island.id, { ...island, rabbits: 0, foxes: 0 })
+  }
+  let atSea = 0
+  for (const [key, list] of [['rabbits', sim.rabbits], ['foxes', sim.foxes]]) {
+    for (const c of list) {
+      if (!c.alive) continue
+      const entry = byId.get(map.landId[c.y * map.size + c.x])
+      if (entry) entry[key] += 1
+      else atSea += 1
+    }
+  }
+  const islands = [...byId.values()]
+  return {
+    islands,
+    atSea,
+    colonised: islands.filter((i) => i.rabbits + i.foxes > 0).length,
+  }
 }
 
 /** Advance the simulation by dtMs of real elapsed time. */
