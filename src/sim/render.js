@@ -18,10 +18,11 @@
 // point: water is now a place only some creatures can go (see sim/water.js).
 
 import { FOREST_VISION_FACTOR, FOX_ENERGY_MAX, foxStats } from './fox.js'
-import { TILE } from '../worldgen/mapgen.js'
+import { hasCover, usesAtlas } from '../worldgen/mapgen.js'
 import { BURROW_CAPACITY, burrowLinks } from './burrow.js'
 import { motionPose } from './motion.js'
 import { rabbitStats } from './rabbit.js'
+import { islandPopulations } from './simulation.js'
 
 const VISION_RADIUS = 5 // tiles - keep in sync with sim/simulation.js
 
@@ -47,6 +48,15 @@ export function drawSimulation(ctx, map, sim, tilePx, viewport) {
   const endX = Math.min(map.size - 1, Math.ceil(viewport.originX + viewport.width / tilePx))
   const endY = Math.min(map.size - 1, Math.ceil(viewport.originY + viewport.height / tilePx))
 
+  // Zoomed right out on a big world (the atlas view - see ATLAS_TILE_PX in
+  // worldgen/mapgen.js) a rabbit is smaller than a pixel, so drawing ears and
+  // a hop on it is wasted work and reads as noise. What the view is for at
+  // that zoom is *where the populations are*, so that is what it draws.
+  if (usesAtlas(map, tilePx)) {
+    drawPopulationOverview(ctx, map, sim, tilePx, ox, oy)
+    return
+  }
+
   drawApples(ctx, map, sim, tilePx, ox, oy, startX, startY, endX, endY)
   // Under everything alive: the warren is terrain the rabbits have built,
   // and a rabbit standing on an entrance should be drawn on top of it.
@@ -54,6 +64,56 @@ export function drawSimulation(ctx, map, sim, tilePx, viewport) {
   drawRabbits(ctx, sim, tilePx, ox, oy, startX, startY, endX, endY)
   // Foxes last, so a fox standing on its kill is drawn over the rabbit.
   drawFoxes(ctx, map, sim, tilePx, ox, oy, startX, startY, endX, endY)
+}
+
+// --------------------------- the atlas overlay ----------------------------
+
+/**
+ * Every creature as a single dot, plus a tally per island.
+ *
+ * On a world of several islands the interesting fact at this zoom is not what
+ * any one rabbit is doing, it is that the northern island holds forty of them
+ * and no foxes while the southern one holds eight and six - i.e. that these
+ * are two populations now, not one. The tallies say that in one glance, and
+ * the dots show a crossing in progress: a lone pair of dots out on the shelf
+ * between two islands is a migration happening.
+ */
+function drawPopulationOverview(ctx, map, sim, tilePx, ox, oy) {
+  const r = Math.max(1.1, tilePx * 0.45)
+  for (const [color, list] of [['rgb(238,232,222)', sim.rabbits], ['rgb(232,132,58)', sim.foxes]]) {
+    ctx.fillStyle = color
+    for (const c of list) {
+      if (!c.alive || c.burrowId != null) continue
+      ctx.beginPath()
+      ctx.arc((renderX(c) + 0.5) * tilePx - ox, (renderY(c) + 0.5) * tilePx - oy, r, 0, Math.PI * 2)
+      ctx.fill()
+    }
+  }
+
+  if (!map.islands || !map.landId) return
+  const stats = islandPopulations(sim)
+  ctx.save()
+  ctx.font = '600 11px ui-sans-serif, system-ui, sans-serif'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  for (const island of stats.islands) {
+    if (!island.rabbits && !island.foxes) continue
+    const label = `${island.rabbits} · ${island.foxes}`
+    const cx = (island.cx + 0.5) * tilePx - ox
+    const cy = (island.cy + 0.5) * tilePx - oy
+    const w = ctx.measureText(label).width + 14
+    ctx.fillStyle = 'rgba(10,12,14,0.72)'
+    ctx.beginPath()
+    ctx.roundRect(cx - w / 2, cy - 9, w, 18, 9)
+    ctx.fill()
+    ctx.fillStyle = 'rgb(238,232,222)'
+    ctx.fillText(label, cx, cy + 0.5)
+    // The fox half of the tally in the fox's own colour, so "island with no
+    // foxes on it" is legible without reading the numbers.
+    ctx.fillStyle = island.foxes ? 'rgb(232,132,58)' : 'rgba(232,132,58,0.35)'
+    ctx.fillRect(cx - w / 2, cy + 7, w, 2)
+  }
+  ctx.restore()
 }
 
 function drawApples(ctx, map, sim, tilePx, ox, oy, startX, startY, endX, endY) {
@@ -510,7 +570,7 @@ function drawFoxes(ctx, map, sim, tilePx, ox, oy, startX, startY, endX, endY) {
     // 45% of its sight (see FOREST_VISION_FACTOR), and watching the circle
     // contract is the clearest way to show that.
     if (selected) {
-      const inForest = map.tileType[fox.y * map.size + fox.x] === TILE.FOREST
+      const inForest = hasCover(map.tileType[fox.y * map.size + fox.x])
       const visionPx = stats.visionRadius * (inForest ? FOREST_VISION_FACTOR : 1) * tilePx
       drawVisionRadius(ctx, cx, baseY, visionPx, 'rgba(251,146,60,')
     }

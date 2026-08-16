@@ -91,7 +91,7 @@ export default function SpawnPalette({ species, count, onSpeciesChange, onCountC
         onClick={onScatter}
         className="min-h-11 rounded-sm border border-neutral-700 bg-neutral-950 px-3 py-2 text-xs font-semibold transition hover:border-neutral-500 hover:text-neutral-100"
       >
-        🎲 Scatter {count} across the island
+        🎲 Scatter {count} across the world
       </button>
 
       {/* Where to drop them is already said on the map itself, so this only

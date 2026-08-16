@@ -8,7 +8,7 @@ import { generateMap } from './worldgen/mapgen.js'
 function App() {
   const [screen, setScreen] = useState('home') // 'home' | 'settings' | 'game'
   const [map, setMap] = useState(null)
-  const { settings, update, reset } = useMapSettings()
+  const { settings, update, updateMany, reset } = useMapSettings()
 
   const playNewMap = useCallback(() => {
     setMap(generateMap(settings))
@@ -20,6 +20,7 @@ function App() {
       <SettingsScreen
         settings={settings}
         onChange={update}
+        onChangeMany={updateMany}
         onReset={reset}
         onBack={() => setScreen(map ? 'game' : 'home')}
         onPlay={playNewMap}

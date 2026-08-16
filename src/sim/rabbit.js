@@ -14,7 +14,7 @@
 // water.js): a warren has to evolve its way into the water, and the payoff -
 // a fox that cannot follow - only exists for the lineages that do.
 
-import { canSwim, describeSwimming, swimDrainFactor, swimSpeedFactor } from './water.js'
+import { canCrossOpenWater, canSwim, describeSwimming, swimDrainFactor, swimSpeedFactor } from './water.js'
 
 /** Display metadata for the sense genes, in inspector order. */
 export const RABBIT_GENE_META = [
@@ -113,6 +113,9 @@ export function rabbitStats(genes) {
     // energy while it's out there.
     swimSkill: skill,
     canSwim: canSwim(skill),
+    // The sea, not the lake: only a lineage that has pushed this gene near
+    // the top of its range can leave the island it was born on (water.js).
+    canCrossOpenWater: canCrossOpenWater(skill),
     swimStrokeTicks: Math.min(
       SWIM_TICKS_RANGE[1],
       Math.max(SWIM_TICKS_RANGE[0], Math.round(WALK_TICKS_PER_TILE / swimSpeedFactor(skill))),

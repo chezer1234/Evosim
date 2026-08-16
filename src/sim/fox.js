@@ -16,7 +16,7 @@
 // gaussian mutations, exactly like both species' brain weights - same
 // evolutionary loop, different representation.
 
-import { canSwim, describeSwimming, swimDrainFactor, swimSpeedFactor } from './water.js'
+import { canCrossOpenWater, canSwim, describeSwimming, swimDrainFactor, swimSpeedFactor } from './water.js'
 
 /** Display metadata for the genes, in inspector order. `high`/`low` are the
  * plain-English readings the UI and describeFox() use, so the wording lives
@@ -225,6 +225,10 @@ export function foxStats(genes) {
     // the refuge only works while the predator is still landlocked.
     swimSkill: genes.swimming ?? 0,
     canSwim: canSwim(genes.swimming ?? 0),
+    // And the sea: a fox only follows prey to the next island if its own swim
+    // gene has come as far as theirs (see OPEN_WATER_MIN_SKILL). Until it
+    // does, an island a warren has reached is an island without foxes on it.
+    canCrossOpenWater: canCrossOpenWater(genes.swimming ?? 0),
     swimSpeedFactor: swimSpeedFactor(genes.swimming ?? 0),
     swimUpkeepMultiplier: swimDrainFactor(genes.swimming ?? 0),
   }

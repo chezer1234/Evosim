@@ -8,9 +8,15 @@ Technical reference for working on Evosim. For what the project *is*, see the [R
 
 ```
 src/
-  worldgen/       Procedural map generation and the Home → Settings → Game screens
-    mapgen.js       Seeded Perlin fBm island generation, lake carving, and canvas rendering
+  worldgen/       Procedural world generation and the Home → Settings → Game screens
+    mapgen.js       Seeded Perlin fBm terrain, one falloff per island, lake carving, and
+                     canvas rendering — including the zoomed-out atlas view
                      (framework-agnostic — no React here)
+    biomes.js       The tile vocabulary and what each biome *is*: classification from
+                     altitude/moisture/temperature, the climate model, and the two things
+                     the sim reads off a biome (cover, and whether it bears fruit)
+    islands.js      Which landmass is which, the shallow shelf around every coast, and
+                     which islands are close enough to swim between (pure array work)
     viewport.js     The map view's pan/zoom/pinch maths (framework-agnostic too)
     useIsCompact.js Media queries behind the responsive layout: compact chrome,
                      touch wording, and where the floating panels dock
@@ -30,7 +36,8 @@ src/
     burrow.js        The warren: capacity, digging rules, and the tunnel network
                      rabbits can move through (framework-agnostic, pure functions)
     water.js         Swimming: the shared skill curve behind both species' swim
-                     genes, the threshold below which water is impassable, and the
+                     genes, the two thresholds (a lake, and the far higher one the
+                     sea asks for), which tiles anything may enter, and the
                      nearest-land search a floundering creature steers by
     motion.js        The visual layer over the tile grid: interpolated positions,
                      hop/glide easing, and the pose (lift, shadow, stride, stroke)
@@ -60,6 +67,9 @@ also covers the predator/prey rebalance and the burrow model.
 
 Swimming is a gene in the same sense, shared by both species (`water.js`), and the
 one place where the *drawing* of a creature diverges completely from its land pose.
+It is also the only way a population ever leaves the island it was born on: see
+[`docs/plans/big-worlds-islands-biomes.md`](plans/big-worlds-islands-biomes.md) for
+multi-island worlds, biomes, the shallow-shelf crossing rule, and the atlas view.
 The tile grid the sim reasons about is unchanged by any of it: what moves smoothly is
 a separate visual position maintained by `motion.js`, which cannot affect where
 anything actually is. See
@@ -86,7 +96,7 @@ make check        # lint + test + build, i.e. everything CI does
 
 `make help` lists every target.
 
-Tests live alongside the source they cover (`*.test.js`) and run on [Vitest](https://vitest.dev). They focus on the pure logic — map-generation invariants, both species' forward pass and mutation (`brain.test.js`, `foxBrain.test.js`), the fox's body genes (mutation bounds, founder weighting, and every gene's mapping to sim units), the rabbit's sense genes and burrow model, the rabbit lifecycle (movement bounds, eating, energy depletion/death, reproduction), predation (hunting, pouncing, fleeing, camouflage, forest cover, pack behaviour), the fox's brain-driven decisions (chasing, tracking a scent, lying up, breeding), the issue #14 survival kit (hearing beyond sight, alarm calls between rabbits, digging/capacity/sheltering), swimming (the skill threshold, pace/energy curves, drowning, floundering back to shore), the motion layer's interpolation and poses, and the map view's pan/zoom/pinch maths (`worldgen/viewport.js`) — since that's the code with real behavior to get wrong.
+Tests live alongside the source they cover (`*.test.js`) and run on [Vitest](https://vitest.dev). They focus on the pure logic — map-generation invariants, both species' forward pass and mutation (`brain.test.js`, `foxBrain.test.js`), the fox's body genes (mutation bounds, founder weighting, and every gene's mapping to sim units), the rabbit's sense genes and burrow model, the rabbit lifecycle (movement bounds, eating, energy depletion/death, reproduction), predation (hunting, pouncing, fleeing, camouflage, forest cover, pack behaviour), the fox's brain-driven decisions (chasing, tracking a scent, lying up, breeding), the issue #14 survival kit (hearing beyond sight, alarm calls between rabbits, digging/capacity/sheltering), swimming (both thresholds, pace/energy curves, drowning, floundering back to shore, and crossing — or failing to cross — to another island), biome classification and the climate model (`worldgen/biomes.test.js`), island labelling and strait detection (`worldgen/islands.test.js`), the motion layer's interpolation and poses, and the map view's pan/zoom/pinch maths (`worldgen/viewport.js`) — since that's the code with real behavior to get wrong.
 
 `sim/render.test.js` is the one exception to "rendering isn't covered": it runs the draw path against a recording canvas stub to pin down the *choice* between the land and water animations (shadow versus waterline clip) and that sprites are drawn at their interpolated position, not their tile. React components still aren't covered.
 

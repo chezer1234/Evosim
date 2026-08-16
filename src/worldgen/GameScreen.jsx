@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { drawMap } from './mapgen.js'
-import { createSimulation, isPlaceable, selectCreature, spawnFox, spawnRabbit, stepSimulation } from '../sim/simulation.js'
+import { createSimulation, islandPopulations, isPlaceable, selectCreature, spawnFox, spawnRabbit, stepSimulation } from '../sim/simulation.js'
 import { drawSimulation } from '../sim/render.js'
 import { computeTraits, describeEnergyEffects, describeTraits } from '../sim/brainInsight.js'
 import { foxStats } from '../sim/fox.js'
@@ -105,6 +105,8 @@ function buildInsightsData(sim) {
     }
   }
 
+  const spread = islandPopulations(sim)
+
   return {
     selected,
     history: sim.traitHistory,
@@ -116,6 +118,20 @@ function buildInsightsData(sim) {
     // Counted across both species: "how much of what is alive out there can
     // get into the water" is the number that moves as the gene spreads.
     swimmers: rabbits.filter((r) => r.senses.canSwim).length + foxes.filter((f) => foxStats(f.genes).canSwim).length,
+    // And the far rarer number: how much of it could leave the island it is
+    // standing on (see OPEN_WATER_MIN_SKILL in sim/water.js).
+    seafarers:
+      rabbits.filter((r) => r.senses.canCrossOpenWater).length +
+      foxes.filter((f) => foxStats(f.genes).canCrossOpenWater).length,
+    islands: spread.islands.length,
+    colonised: spread.colonised,
+    atSea: spread.atSea,
+    // Only the islands with something living on them, biggest population
+    // first - an empty archipelago would otherwise be twelve rows of zeroes.
+    islandRows: spread.islands
+      .filter((i) => i.rabbits + i.foxes > 0)
+      .sort((a, b) => b.rabbits + b.foxes - (a.rabbits + a.foxes))
+      .slice(0, 8),
     drownings: sim.drownings,
     generationRange: generationRangeOf(rabbits),
     foxGenerationRange: generationRangeOf(foxes),
@@ -815,6 +831,15 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
               <span>
                 Lakes <b className="font-mono text-neutral-100 tabular-nums">{map.lakeCount}</b>
               </span>
+              {/* Only worth the space on a world that has more than one:
+                  "islands, of which N reachable from each other by a strong
+                  enough swimmer" is the headline fact about a big map. */}
+              {map.islandCount > 1 ? (
+                <span title={`${map.groupCount} group${map.groupCount === 1 ? '' : 's'} of islands that can be swum between`}>
+                  Islands <b className="font-mono text-neutral-100 tabular-nums">{map.islandCount}</b>
+                  <span className="text-neutral-500"> / {map.groupCount} apart</span>
+                </span>
+              ) : null}
               <span>
                 Seed <b className="font-mono text-neutral-100 tabular-nums">{map.seed}</b>
               </span>
@@ -883,11 +908,20 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
               burrows={insightsData?.burrows ?? 0}
               sheltered={insightsData?.sheltered ?? 0}
               swimmers={insightsData?.swimmers ?? 0}
+              seafarers={insightsData?.seafarers ?? 0}
+              islands={insightsData?.islands ?? (map?.islandCount ?? 1)}
+              colonised={insightsData?.colonised ?? 0}
+              atSea={insightsData?.atSea ?? 0}
+              islandRows={insightsData?.islandRows ?? []}
               drownings={insightsData?.drownings ?? 0}
               history={insightsData?.history ?? []}
               generationRange={insightsData?.generationRange ?? null}
               foxGenerationRange={insightsData?.foxGenerationRange ?? null}
-              mapInfo={compact && map ? { size: map.size, lakeCount: map.lakeCount, seed: map.seed } : null}
+              mapInfo={
+                compact && map
+                  ? { size: map.size, lakeCount: map.lakeCount, islandCount: map.islandCount, seed: map.seed }
+                  : null
+              }
               onClose={togglePopulation}
             />
           </div>

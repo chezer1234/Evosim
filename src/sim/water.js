@@ -29,6 +29,28 @@ import { TILE } from '../worldgen/mapgen.js'
  */
 export const SWIM_MIN_SKILL = 0.35
 
+/**
+ * The *sea's* waterline, and the only way a population ever leaves the island
+ * it was born on.
+ *
+ * A lake asks a creature to be able to swim. The sea asks it to be good at
+ * it: this threshold sits at the top of the gene's range, far above anything
+ * a founder is born with and above where a lineage that merely uses lakes
+ * tends to settle. Even then it only buys the shallow shelf that hugs every
+ * coast (see worldgen/islands.js) - deep water is impassable to everything,
+ * always - so a crossing is possible exactly where two islands are close
+ * enough for their shelves to meet, and nowhere else.
+ *
+ * That is the migration rule in one number: strong swimmers, narrow channels.
+ * Everything else stays where it is.
+ */
+export const OPEN_WATER_MIN_SKILL = 0.72
+
+// The sea is harder work than a lake: swell, and no bank a few strokes away.
+// Applied on top of the usual swim drain, so a crossing costs a real bite of
+// the energy a creature would otherwise be breeding with.
+export const OCEAN_DRAIN_FACTOR = 1.35
+
 // A barely-competent swimmer moves at just over a quarter of its overland
 // pace; a strong one is nearly as quick in the water as out of it. The bottom
 // of the range is deliberately punishing: crossing a five-tile lake as a poor
@@ -54,16 +76,59 @@ function clamp01(v) {
   return Math.min(1, Math.max(0, v))
 }
 
-/** Is this tile water? Lakes are swimmable; the open ocean is the edge of
- * the world and stays impassable to everything (see isPlaceable). */
+/** Is this tile water of either kind? */
 export function isWaterTile(map, x, y) {
   const t = map.tileType[y * map.size + x]
   return t === TILE.OCEAN || t === TILE.LAKE
 }
 
+export function isOceanTile(map, x, y) {
+  return map.tileType[y * map.size + x] === TILE.OCEAN
+}
+
+/** Sea within swimming distance of a coast - the shelf, and the only part of
+ * the ocean anything may enter. Maps generated before the shelf existed (and
+ * the hand-built ones in the tests) have no `shallow` array at all, which
+ * reads as "no crossable sea anywhere", i.e. the old behaviour. */
+export function isShallowOcean(map, x, y) {
+  const idx = y * map.size + x
+  return map.tileType[idx] === TILE.OCEAN && map.shallow?.[idx] === 1
+}
+
 /** Can a creature with this swim gene choose to enter water at all? */
 export function canSwim(skill) {
   return skill >= SWIM_MIN_SKILL
+}
+
+/** Can it strike out across a channel between two islands? */
+export function canCrossOpenWater(skill) {
+  return skill >= OPEN_WATER_MIN_SKILL
+}
+
+/**
+ * May this creature put itself on that tile?
+ *
+ * Land is always allowed. A lake needs the swim gene, the shelf between two
+ * islands needs the much higher open-water gene, and deep sea is refused to
+ * everything. `fromWater` is the one exemption, and it is about not building
+ * traps rather than about ability: something already in the water has to be
+ * able to move through water to reach a bank at all, or a floundering
+ * creature would be pinned in place until it drowned.
+ */
+export function canEnterTile(map, x, y, ability, fromWater) {
+  if (x < 0 || y < 0 || x >= map.size || y >= map.size) return false
+  const t = map.tileType[y * map.size + x]
+  if (t === TILE.LAKE) return ability.canSwim || fromWater
+  if (t === TILE.OCEAN) {
+    if (!map.shallow?.[y * map.size + x]) return false
+    return ability.canCrossOpenWater || fromWater
+  }
+  return true
+}
+
+/** How much harder this stretch of water is than the same distance of lake. */
+export function waterDrainFactor(map, x, y) {
+  return isOceanTile(map, x, y) ? OCEAN_DRAIN_FACTOR : 1
 }
 
 // Skill is re-scaled across the *usable* part of the range (threshold -> 1)
@@ -89,7 +154,11 @@ export function describeSwimming(skill) {
   if (!canSwim(skill)) {
     return `Cannot swim (${Math.round(skill * 100)}%, needs ${Math.round(SWIM_MIN_SKILL * 100)}%) - open water is a wall it will not cross, and it drowns if it ends up out there anyway.`
   }
-  return `Swims at ${Math.round(swimSpeedFactor(skill) * 100)}% of its overland pace and burns ${swimDrainFactor(skill).toFixed(1)}x the energy doing it.`
+  const base = `Swims at ${Math.round(swimSpeedFactor(skill) * 100)}% of its overland pace and burns ${swimDrainFactor(skill).toFixed(1)}x the energy doing it.`
+  if (canCrossOpenWater(skill)) {
+    return `${base} Strong enough for the sea: it can cross a narrow channel to another island, at ${OCEAN_DRAIN_FACTOR.toFixed(2)}x even that cost.`
+  }
+  return `${base} Lakes only - at ${Math.round(skill * 100)}% it will not take on the sea, which needs ${Math.round(OPEN_WATER_MIN_SKILL * 100)}%.`
 }
 
 // Rings outward from the creature's own tile. Ordered nearest-first so the

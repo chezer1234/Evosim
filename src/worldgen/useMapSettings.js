@@ -27,10 +27,23 @@ export function useMapSettings() {
 
   const update = useCallback((key, value) => {
     setSettings((prev) => {
-      let next = { ...prev, [key]: value }
-      // keep the min/max lake range coherent regardless of which handle moved
+      const next = { ...prev, [key]: value }
+      // keep the min/max ranges coherent regardless of which handle moved
       if (key === 'minLakes' && value > next.maxLakes) next.maxLakes = value
       if (key === 'maxLakes' && value < next.minLakes) next.minLakes = value
+      if (key === 'minIslands' && value > next.maxIslands) next.maxIslands = value
+      if (key === 'maxIslands' && value < next.minIslands) next.minIslands = value
+      persist(next)
+      return next
+    })
+  }, [])
+
+  /** Several keys at once, for the world presets - where size and island
+   *  count have to move together or the intermediate state is a world nobody
+   *  asked for (a 224-tile map with one island on it). */
+  const updateMany = useCallback((patch) => {
+    setSettings((prev) => {
+      const next = { ...prev, ...patch }
       persist(next)
       return next
     })
@@ -42,5 +55,5 @@ export function useMapSettings() {
     setSettings(next)
   }, [])
 
-  return { settings, update, reset }
+  return { settings, update, updateMany, reset }
 }
