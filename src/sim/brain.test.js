@@ -21,11 +21,13 @@ describe('createBrain', () => {
 
 describe('think', () => {
   const brain = createBrain(mulberry32(7))
-  const neutralInputs = [1, 0.5, 0, 0, 1, 0, 0]
+  // bias, energy, apple dx/dy/dist, onWater, noise, fox dx/dy/dist - "no
+  // apple and no fox visible" reads as distance 1 for both.
+  const neutralInputs = [1, 0.5, 0, 0, 1, 0, 0, 0, 0, 1]
 
-  it('returns all six expected outputs', () => {
+  it('returns all seven expected outputs', () => {
     const out = think(brain, neutralInputs)
-    expect(Object.keys(out).sort()).toEqual(['moveX', 'moveY', 'reproduceDesire', 'rest', 'run', 'searchDrive'].sort())
+    expect(Object.keys(out).sort()).toEqual(['moveX', 'moveY', 'reproduceDesire', 'rest', 'run', 'searchDrive', 'flee'].sort())
   })
 
   it('keeps outputs within their activation ranges', () => {
@@ -34,7 +36,7 @@ describe('think', () => {
     expect(out.moveX).toBeLessThanOrEqual(1)
     expect(out.moveY).toBeGreaterThanOrEqual(-1)
     expect(out.moveY).toBeLessThanOrEqual(1)
-    for (const key of ['run', 'rest', 'reproduceDesire', 'searchDrive']) {
+    for (const key of ['run', 'rest', 'reproduceDesire', 'searchDrive', 'flee']) {
       expect(out[key]).toBeGreaterThanOrEqual(0)
       expect(out[key]).toBeLessThanOrEqual(1)
     }
@@ -47,9 +49,26 @@ describe('think', () => {
   })
 
   it('produces different output for different inputs', () => {
-    const a = think(brain, [1, 0.9, 1, 1, 0.1, 0, 0])
-    const b = think(brain, [1, 0.1, -1, -1, 1, 1, 0])
+    const a = think(brain, [1, 0.9, 1, 1, 0.1, 0, 0, 0, 0, 1])
+    const b = think(brain, [1, 0.1, -1, -1, 1, 1, 0, 0, 0, 1])
     expect(a).not.toEqual(b)
+  })
+
+  it('reacts to the predator inputs, not just the food ones', () => {
+    const noFox = think(brain, [1, 0.5, 0, 0, 1, 0, 0, 0, 0, 1])
+    const foxAdjacent = think(brain, [1, 0.5, 0, 0, 1, 0, 0, -0.2, -0.2, 0.2])
+    expect(foxAdjacent).not.toEqual(noFox)
+  })
+
+  it('starts fresh brains biased toward fleeing rather than a coin flip', () => {
+    // FLEE_INITIAL_BIAS: a founder population that has to discover running
+    // away gets eaten before selection can act (see brain.js).
+    let fleeing = 0
+    for (let seed = 0; seed < 40; seed++) {
+      const out = think(createBrain(mulberry32(seed)), neutralInputs)
+      if (out.flee > 0.5) fleeing += 1
+    }
+    expect(fleeing).toBeGreaterThan(25)
   })
 })
 

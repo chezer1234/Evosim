@@ -4,14 +4,18 @@
 // Selection happens implicitly through who survives and reproduces - see
 // docs/plans/issue-2-species-rabbits.md for the reasoning.
 
-export const INPUT_SIZE = 7 // bias, energy, dx, dy, dist-to-apple, onWater, noise
+// bias, energy, dx/dy/dist-to-apple, onWater, noise, then dx/dy/dist to the
+// nearest fox the rabbit has spotted (see PREY_ALERT_RADIUS in
+// simulation.js) - predators are something a rabbit has to be able to *see*
+// before it can evolve any response to them.
+export const INPUT_SIZE = 10
 export const HIDDEN_SIZE = 8
-export const OUTPUT_SIZE = 6 // moveX, moveY, run, rest, reproduceDesire, searchDrive
-// Index of the searchDrive output within b2/w2 - called out by name because
-// createBrain nudges its initial bias (see below) and simulation.js reads it
-// as a genuine, evolvable "how eager am I to actively search when I can't
-// see food" trait rather than a hardcoded behavior.
+export const OUTPUT_SIZE = 7 // moveX, moveY, run, rest, reproduceDesire, searchDrive, flee
+// Indices within b2/w2 that are called out by name because createBrain
+// nudges their initial bias (see below) and simulation.js reads them as
+// genuine evolvable traits rather than hardcoded behavior.
 const SEARCH_DRIVE_OUTPUT = 5
+const FLEE_OUTPUT = 6
 
 const WEIGHT_RANGE = 1.5
 // Freshly spawned brains start with searchDrive biased toward "yes" - real
@@ -21,6 +25,13 @@ const WEIGHT_RANGE = 1.5
 // lineage's search drive down (or further up) over generations; this just
 // sets the starting prior. See docs/plans/issue-2-species-rabbits.md.
 const SEARCH_DRIVE_INITIAL_BIAS = 1.2
+// Same idea for fleeing: a founder population that has to *discover* running
+// away from foxes would simply be eaten before selection could act, so fresh
+// brains start jumpy and a lineage has to evolve its way toward calm. (A
+// fox close enough to pounce triggers a hard panic override regardless - see
+// PANIC_RADIUS in simulation.js - so this gene governs the middle distance,
+// where bolting early is safe but costs foraging time.)
+const FLEE_INITIAL_BIAS = 1.2
 
 function randWeight(rng) {
   return (rng() * 2 - 1) * WEIGHT_RANGE
@@ -38,6 +49,7 @@ export function createBrain(rng) {
   for (let i = 0; i < w2.length; i++) w2[i] = randWeight(rng)
   for (let i = 0; i < b2.length; i++) b2[i] = randWeight(rng)
   b2[SEARCH_DRIVE_OUTPUT] += SEARCH_DRIVE_INITIAL_BIAS
+  b2[FLEE_OUTPUT] += FLEE_INITIAL_BIAS
   return { w1, b1, w2, b2 }
 }
 
@@ -76,6 +88,7 @@ export function think(brain, inputs) {
     rest: sigmoid(out[3]),
     reproduceDesire: sigmoid(out[4]),
     searchDrive: sigmoid(out[5]),
+    flee: sigmoid(out[6]),
   }
 }
 

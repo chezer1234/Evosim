@@ -38,7 +38,7 @@ export default function RabbitInsights({ selected, onClose }) {
           <p className="text-xs text-neutral-400">
             {selected.alive ? `Energy ${selected.energy}/100` : 'Deceased'}
             {selected.gestating ? ' · expecting' : ''}
-            {selected.searching ? ' · searching' : selected.running ? ' · running' : selected.resting ? ' · resting' : ''}
+            {selected.fleeing ? ' · 🦊 fleeing' : selected.searching ? ' · searching' : selected.running ? ' · running' : selected.resting ? ' · resting' : ''}
           </p>
           <div className="flex flex-col gap-1.5 rounded-sm border border-neutral-800 bg-neutral-950 p-2">
             {TRAIT_META.map((m) => (
