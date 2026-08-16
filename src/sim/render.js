@@ -3,7 +3,10 @@
 // top of drawMap's terrain pass; mirrors its viewport math (see
 // worldgen/mapgen.js's drawMap) so both layers line up under pan/zoom.
 
-import { foxStats } from './fox.js'
+import { FOREST_VISION_FACTOR, foxStats } from './fox.js'
+import { TILE } from '../worldgen/mapgen.js'
+import { BURROW_CAPACITY, burrowLinks } from './burrow.js'
+import { rabbitStats } from './rabbit.js'
 
 const VISION_RADIUS = 5 // tiles - keep in sync with sim/simulation.js
 
@@ -16,9 +19,12 @@ export function drawSimulation(ctx, map, sim, tilePx, viewport) {
   const endY = Math.min(map.size - 1, Math.ceil(viewport.originY + viewport.height / tilePx))
 
   drawApples(ctx, map, sim, tilePx, ox, oy, startX, startY, endX, endY)
+  // Under everything alive: the warren is terrain the rabbits have built,
+  // and a rabbit standing on an entrance should be drawn on top of it.
+  drawBurrows(ctx, sim, tilePx, ox, oy)
   drawRabbits(ctx, sim, tilePx, ox, oy, startX, startY, endX, endY)
   // Foxes last, so a fox standing on its kill is drawn over the rabbit.
-  drawFoxes(ctx, sim, tilePx, ox, oy, startX, startY, endX, endY)
+  drawFoxes(ctx, map, sim, tilePx, ox, oy, startX, startY, endX, endY)
 }
 
 function drawApples(ctx, map, sim, tilePx, ox, oy, startX, startY, endX, endY) {
@@ -41,16 +47,86 @@ function rgb(r, g, b) {
   return `rgb(${r | 0},${g | 0},${b | 0})`
 }
 
+// =============================== Burrows =================================
+// A burrow reads as a dark mouth in a small mound of spoil, with one pip per
+// rabbit sheltering in it (capacity 5, see sim/burrow.js) - so "is there
+// room in there" is answerable at a glance rather than only in the panel.
+// Entrances close enough to share a tunnel are joined by a dashed line: that
+// line is the difference between a hole and a network, and it's the thing
+// that lets a cornered rabbit surface somewhere else.
+
+const TUNNEL_DASH = [3, 4]
+
+function drawBurrows(ctx, sim, tilePx, ox, oy) {
+  if (!sim.burrows.length) return
+  const r = Math.max(1.5, tilePx * 0.3)
+
+  ctx.save()
+  ctx.setLineDash(TUNNEL_DASH)
+  ctx.strokeStyle = 'rgba(146,109,72,0.5)'
+  ctx.lineWidth = Math.max(0.6, tilePx * 0.05)
+  ctx.beginPath()
+  for (const [a, b] of burrowLinks(sim.burrows)) {
+    ctx.moveTo((a.x + 0.5) * tilePx - ox, (a.y + 0.5) * tilePx - oy)
+    ctx.lineTo((b.x + 0.5) * tilePx - ox, (b.y + 0.5) * tilePx - oy)
+  }
+  ctx.stroke()
+  ctx.restore()
+
+  for (const burrow of sim.burrows) {
+    const cx = (burrow.x + 0.5) * tilePx - ox
+    const cy = (burrow.y + 0.5) * tilePx - oy
+
+    // Spoil heap around the mouth.
+    ctx.beginPath()
+    ctx.fillStyle = 'rgba(120,92,60,0.75)'
+    ctx.ellipse(cx, cy + r * 0.2, r * 1.15, r * 0.8, 0, 0, Math.PI * 2)
+    ctx.fill()
+
+    // The hole itself: a flat near-black ellipse, darker than any terrain.
+    ctx.beginPath()
+    ctx.fillStyle = 'rgb(26,20,15)'
+    ctx.ellipse(cx, cy, r * 0.72, r * 0.52, 0, 0, Math.PI * 2)
+    ctx.fill()
+    ctx.lineWidth = Math.max(0.4, tilePx * 0.03)
+    ctx.strokeStyle = 'rgba(72,54,36,0.9)'
+    ctx.stroke()
+
+    if (tilePx >= 10) drawOccupancyPips(ctx, cx, cy, r, burrow.occupants.length)
+  }
+}
+
+function drawOccupancyPips(ctx, cx, cy, r, occupied) {
+  const gap = r * 0.42
+  const left = cx - (gap * (BURROW_CAPACITY - 1)) / 2
+  for (let i = 0; i < BURROW_CAPACITY; i++) {
+    ctx.beginPath()
+    ctx.fillStyle = i < occupied ? 'rgb(235,231,224)' : 'rgba(235,231,224,0.22)'
+    ctx.arc(left + i * gap, cy - r * 1.05, Math.max(0.6, r * 0.13), 0, Math.PI * 2)
+    ctx.fill()
+  }
+}
+
 function drawRabbits(ctx, sim, tilePx, ox, oy, startX, startY, endX, endY) {
   const r = Math.max(1.5, tilePx * 0.22)
   for (const rabbit of sim.rabbits) {
     if (!rabbit.alive) continue
+    // Underground: nothing to draw. The burrow's occupancy pips are where a
+    // sheltering rabbit shows up (see drawBurrows), which is also the honest
+    // picture - a fox can't see it either.
+    if (rabbit.burrowId != null) continue
     if (rabbit.x < startX - 1 || rabbit.x > endX + 1 || rabbit.y < startY - 1 || rabbit.y > endY + 1) continue
     const cx = (rabbit.x + 0.5) * tilePx - ox
     const cy = (rabbit.y + 0.5) * tilePx - oy
     const selected = sim.selectedKind === 'rabbit' && rabbit.id === sim.selectedId
 
-    if (selected) drawVisionRadius(ctx, cx, cy, VISION_RADIUS * tilePx, 'rgba(255,224,102,')
+    if (selected) {
+      // Two rings, because a rabbit now has two senses with very different
+      // reach: what it can see, and the much wider circle it can hear.
+      drawVisionRadius(ctx, cx, cy, rabbitStats(rabbit.genes).hearingRadius * tilePx, 'rgba(147,197,253,')
+      drawVisionRadius(ctx, cx, cy, VISION_RADIUS * tilePx, 'rgba(255,224,102,')
+    }
+    if (rabbit.alarmUntil > sim.clock && tilePx >= 6) drawAlarmCall(ctx, cx, cy, r)
 
     // Panic reads first: a fleeing rabbit is the most important thing on
     // screen, so it gets a colour nothing else uses plus an alarm ring.
@@ -166,6 +242,20 @@ function drawVisionRadius(ctx, cx, cy, radiusPx, rgbaPrefix) {
   ctx.fill()
 }
 
+// Sound waves off a rabbit that is calling a fox out to the rest of the
+// warren (issue #14). Drawn as arcs opening upward rather than a full ring,
+// so it never reads as the fleeing alarm ring below - one means "this rabbit
+// is running", the other means "this rabbit is telling everyone".
+function drawAlarmCall(ctx, cx, cy, r) {
+  ctx.strokeStyle = 'rgba(216,180,254,0.9)'
+  ctx.lineWidth = Math.max(0.5, r * 0.12)
+  for (const scale of [1.6, 2.2, 2.8]) {
+    ctx.beginPath()
+    ctx.arc(cx, cy - r * 0.6, r * scale, Math.PI * 1.15, Math.PI * 1.85)
+    ctx.stroke()
+  }
+}
+
 // A quick pulse-free red ring around a bolting rabbit - readable even when
 // zoomed out far enough that the body colour alone is a couple of pixels.
 function drawAlarmRing(ctx, cx, cy, r) {
@@ -216,7 +306,7 @@ function mix(a, b, t) {
   return a + (b - a) * t
 }
 
-function drawFoxes(ctx, sim, tilePx, ox, oy, startX, startY, endX, endY) {
+function drawFoxes(ctx, map, sim, tilePx, ox, oy, startX, startY, endX, endY) {
   // Deliberately bigger than the rabbits' 0.22: a predator that reads as the
   // same size as its prey doesn't look like a threat on the map.
   const r = Math.max(2.5, tilePx * 0.4)
@@ -228,7 +318,14 @@ function drawFoxes(ctx, sim, tilePx, ox, oy, startX, startY, endX, endY) {
     const selected = sim.selectedKind === 'fox' && fox.id === sim.selectedId
     const stats = foxStats(fox.genes)
 
-    if (selected) drawVisionRadius(ctx, cx, cy, stats.visionRadius * tilePx, 'rgba(251,146,60,')
+    // The ring shrinks when it steps under the canopy: forest costs a fox
+    // 45% of its sight (see FOREST_VISION_FACTOR), and watching the circle
+    // contract is the clearest way to show that.
+    if (selected) {
+      const inForest = map.tileType[fox.y * map.size + fox.x] === TILE.FOREST
+      const visionPx = stats.visionRadius * (inForest ? FOREST_VISION_FACTOR : 1) * tilePx
+      drawVisionRadius(ctx, cx, cy, visionPx, 'rgba(251,146,60,')
+    }
     if (fox.hunting && tilePx >= 5) drawMenaceGlow(ctx, cx, cy, r)
 
     ctx.save()

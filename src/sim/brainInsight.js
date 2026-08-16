@@ -10,13 +10,13 @@
 
 import { HIDDEN_SIZE, INPUT_SIZE, OUTPUT_SIZE } from './brain.js'
 
-export const INPUT_LABELS = ['Baseline', 'Energy level', 'Food direction (x)', 'Food direction (y)', 'Food distance', 'In water', 'Randomness', 'Fox direction (x)', 'Fox direction (y)', 'Fox distance']
-export const OUTPUT_LABELS = ['Move X', 'Move Y', 'Run', 'Rest', 'Want to breed', 'Search drive', 'Flee']
+export const INPUT_LABELS = ['Baseline', 'Energy level', 'Food direction (x)', 'Food direction (y)', 'Food distance', 'In water', 'Randomness', 'Fox direction (x)', 'Fox direction (y)', 'Fox distance', 'Alarm call', 'Burrow direction (x)', 'Burrow direction (y)', 'Underground']
+export const OUTPUT_LABELS = ['Move X', 'Move Y', 'Run', 'Rest', 'Want to breed', 'Search drive', 'Flee', 'Take cover']
 
 // Input/output indices, kept in sync with simulation.js's `inputs` array and
 // brain.js's think() output shape.
-const IN = { BIAS: 0, ENERGY: 1, FOOD_X: 2, FOOD_Y: 3, FOOD_DIST: 4, WATER: 5, NOISE: 6, FOX_X: 7, FOX_Y: 8, FOX_DIST: 9 }
-const OUT = { MOVE_X: 0, MOVE_Y: 1, RUN: 2, REST: 3, BREED: 4, SEARCH: 5, FLEE: 6 }
+const IN = { BIAS: 0, ENERGY: 1, FOOD_X: 2, FOOD_Y: 3, FOOD_DIST: 4, WATER: 5, NOISE: 6, FOX_X: 7, FOX_Y: 8, FOX_DIST: 9, ALARM: 10, BURROW_X: 11, BURROW_Y: 12, SHELTERED: 13 }
+const OUT = { MOVE_X: 0, MOVE_Y: 1, RUN: 2, REST: 3, BREED: 4, SEARCH: 5, FLEE: 6, HIDE: 7 }
 
 /** pathways[input][output] = signed net pull of that input on that output,
  * summed across the hidden layer. */
@@ -51,6 +51,8 @@ export const TRAIT_META = [
   { key: 'broodiness', label: 'Broodiness', color: 'rgb(244,114,182)' },
   { key: 'searchDrive', label: 'Search drive', color: 'rgb(56,189,248)' },
   { key: 'skittishness', label: 'Skittishness', color: 'rgb(251,146,60)' },
+  { key: 'burrowInstinct', label: 'Burrow instinct', color: 'rgb(180,132,86)' },
+  { key: 'heedsAlarm', label: 'Heeds alarm calls', color: 'rgb(216,180,254)' },
 ]
 
 /** Six 0..1 traits summarizing a genome's tendencies, independent of any
@@ -74,6 +76,15 @@ export function computeTraits(brain) {
     // simulation.js), so this is about the middle distance: bolt early and
     // stay alive, or hold your nerve and keep eating.
     skittishness: squash(p[IN.BIAS][OUT.FLEE]),
+    // How readily this genome goes to ground rather than just running - the
+    // burrow half of issue #14's survival kit. Digging costs 7 energy and
+    // eating stops while it's down there, so a high score is a rabbit that
+    // trades foraging time for safety.
+    burrowInstinct: squash(p[IN.BIAS][OUT.HIDE]),
+    // Whether another rabbit's alarm call actually moves this one: the sum
+    // of how much the alarm input pushes it to flee and to take cover.
+    // Low means it only reacts to danger it perceives itself.
+    heedsAlarm: squash(p[IN.ALARM][OUT.FLEE] + p[IN.ALARM][OUT.HIDE]),
     _pathways: p,
   }
 }
@@ -92,8 +103,10 @@ export function describeTraits(t) {
     t.broodiness > 0.5 ? 'eager to breed' : 'reluctant to breed',
     t.searchDrive > 0.5 ? 'searches actively when food is out of sight' : 'tends to sit tight when food is out of sight',
     t.skittishness > 0.5 ? 'bolts at the first sight of a fox' : 'holds its nerve around foxes until they get close',
+    t.burrowInstinct > 0.5 ? 'digs in rather than trusting its legs' : 'would rather run than go to ground',
+    t.heedsAlarm > 0.5 ? 'takes another rabbit’s alarm call as seriously as its own eyes' : 'largely ignores other rabbits’ alarm calls',
   ]
-  return `This rabbit has ${parts[0]}, a ${parts[1]}, ${parts[2]}, ${parts[3]}, and is ${parts[4]}. It also ${parts[5]}, and ${parts[6]}.`
+  return `This rabbit has ${parts[0]}, a ${parts[1]}, ${parts[2]}, ${parts[3]}, and is ${parts[4]}. It also ${parts[5]}, and ${parts[6]}. Under pressure it ${parts[7]}, and ${parts[8]}.`
 }
 
 /** Short "why it acts this way" notes for run/rest/breed, based on how each

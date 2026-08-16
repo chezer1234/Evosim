@@ -5,6 +5,7 @@
 // stays focused on whichever rabbit is selected.
 
 import { TRAIT_META } from '../sim/brainInsight.js'
+import { RABBIT_GENE_META } from '../sim/rabbit.js'
 import BrainNetworkDiagram from './BrainNetworkDiagram.jsx'
 import { CloseButton, PANEL_SHELL } from './panelChrome.jsx'
 import { useIsTouch } from './useIsCompact.js'
@@ -39,8 +40,34 @@ export default function RabbitInsights({ selected, onClose }) {
           <p className="text-xs text-neutral-400">
             {selected.alive ? `Energy ${selected.energy}/100` : 'Deceased'}
             {selected.gestating ? ' · expecting' : ''}
-            {selected.fleeing ? ' · 🦊 fleeing' : selected.searching ? ' · searching' : selected.running ? ' · running' : selected.resting ? ' · resting' : ''}
+            {selected.sheltered
+              ? ' · 🕳 underground'
+              : selected.fleeing
+                ? ' · 🦊 fleeing'
+                : selected.searching
+                  ? ' · searching'
+                  : selected.running
+                    ? ' · running'
+                    : selected.resting
+                      ? ' · resting'
+                      : ''}
+            {selected.heardOnly ? ' · 👂 heard a fox it cannot see' : ''}
+            {selected.calling ? ' · 📣 calling' : selected.alarmHeard > 0 ? ` · 👂 hears an alarm (${Math.round(selected.alarmHeard * 100)}%)` : ''}
           </p>
+          {/* Senses first: they're an explicit gene vector (see sim/rabbit.js),
+              unlike the neural-net traits below, and they're what decides
+              whether this rabbit ever learns a fox is coming. */}
+          <div className="flex flex-col gap-1.5 rounded-sm border border-neutral-800 bg-neutral-950 p-2">
+            <h4 className="text-[10px] font-semibold tracking-wide text-blue-300/80 uppercase">Senses</h4>
+            {RABBIT_GENE_META.map((m) => (
+              <TraitBar key={m.key} label={m.label} value={selected.genes[m.key]} color={m.color} />
+            ))}
+            <ul className="flex flex-col gap-1 text-[10px] text-neutral-500">
+              {selected.senseNotes.map((note) => (
+                <li key={note}>👂 {note}</li>
+              ))}
+            </ul>
+          </div>
           <div className="flex flex-col gap-1.5 rounded-sm border border-neutral-800 bg-neutral-950 p-2">
             {TRAIT_META.map((m) => (
               <TraitBar key={m.key} label={m.label} value={selected.traits[m.key]} color={m.color} />
