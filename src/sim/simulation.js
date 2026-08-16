@@ -12,7 +12,19 @@
 import { TILE } from '../worldgen/mapgen.js'
 import { createBrain, mutateBrain, think } from './brain.js'
 import { computeTraits } from './brainInsight.js'
-import { FOX_ENERGY_MAX, FOX_GENE_KEYS, createFoxGenes, foxStats, mutateFoxGenes } from './fox.js'
+import { FOREST_VISION_FACTOR, FOX_ENERGY_MAX, FOX_GENE_KEYS, createFoxGenes, foxStats, mutateFoxGenes } from './fox.js'
+import { RABBIT_GENE_KEYS, alarmReach, createRabbitGenes, mutateRabbitGenes, rabbitStats } from './rabbit.js'
+import {
+  BURROW_BUILD_ENERGY,
+  BURROW_SENSE_RADIUS,
+  canDigAt,
+  createBurrow,
+  enterBurrow,
+  hasSpace,
+  leaveBurrow,
+  linkedBurrows,
+  nearestBurrow,
+} from './burrow.js'
 
 export const TICK_MS = 200 // decision-tick cadence (~5/sec)
 const VISION_RADIUS = 5 // tiles
@@ -88,6 +100,44 @@ const FOX_SPRINT_RANGE = 7 // only worth sprinting once the prey is this close
 const FOX_WATER_SPEED = 0.55 // foxes wade badly; rabbits swim slowly too
 const FOX_MAX_STEPS_PER_TICK = 2 // safety rail on the fractional step budget
 const FOX_PACK_KEEP_DISTANCE = 2.5 // don't crowd a packmate once alongside it
+// How loud a fox is to a rabbit's ears. Hearing is the sense camouflage
+// can't beat (issue #14) - but it can be beaten by *moving quietly*, which
+// is what keeps a stalking fox viable: a sprint through the undergrowth
+// carries much further than a slow prowl, and a fox standing still over a
+// carcass gives away least of all. Since heavy legs are the noisy ones, the
+// speed gene is what a fox pays with, not its coat.
+const FOX_NOISE_SPRINTING = 1.25
+const FOX_NOISE_FEEDING = 0.6
+const FOX_NOISE_PROWLING = [0.5, 1.0] // by speed gene: a slow stalker is quiet
+
+// ========================= Alarm calls / burrows =========================
+// A rabbit that detects a fox calls it - automatically, not as an evolved
+// decision: thumping at a predator is a reflex, and a founder population that
+// had to discover it would be eaten first. What *is* evolvable is the
+// listening half (see the ALARM input in brain.js and `heedsAlarm` in
+// brainInsight.js): whether another rabbit's call moves you, and whether it
+// moves you to run or to go to ground.
+const ALARM_CALL_MS = 1400
+// A call this loud (as a fraction of the caller/listener reach, see
+// alarmReach) is treated as a hard panic by a rabbit that has detected
+// nothing itself - the same reasoning as PANIC_RADIUS above. Quieter calls
+// only matter through the brain's own evolved response to them.
+const ALARM_PANIC_STRENGTH = 0.5
+// Digging is only worth it with something in reserve afterwards: at exactly
+// BURROW_BUILD_ENERGY a rabbit would finish the hole and starve in it.
+const BURROW_BUILD_RESERVE = 25
+// Above this, a calm rabbit with no burrow in reach will dig one anyway, so
+// warrens exist before the first fox arrives rather than only during a
+// panic (nobody digs a good hole while being chased).
+const BURROW_DIG_CALM_ENERGY = 70
+const SHELTER_MIN_TICKS = 5 // ~1s underground minimum: stops entry/exit flicker
+// A sheltering rabbit cannot eat, so hunger is what eventually forces it back
+// up - the cost that stops "hide forever" from being a winning strategy.
+const SHELTER_HUNGRY_ENERGY = 45
+const SHELTER_ALL_CLEAR_TICKS = 10 // ticks with nothing detected before it will surface
+// A fox this close to an entrance means coming up there is suicide: the
+// rabbit uses the tunnel network and surfaces at a connected burrow instead.
+const BURROW_MOUTH_DANGER = 2.5
 
 let nextRabbitId = 1
 let nextFoxId = 1
@@ -114,6 +164,11 @@ export function createSimulation(map) {
     map,
     rabbits: [],
     foxes: [],
+    // Every burrow dug so far (see ./burrow.js). Persist for the whole run
+    // even when empty: an abandoned hole is still somewhere the next
+    // generation can bolt into, which is what makes a warren an asset a
+    // population inherits rather than a per-rabbit possession.
+    burrows: [],
     hasApple: map.canHaveApple.slice(),
     regrowAt: new Float32Array(map.size * map.size).fill(-1),
     clock: 0,
@@ -133,7 +188,8 @@ export function selectCreature(sim, kind, id) {
   sim.selectedId = id == null ? null : id
 }
 
-export function spawnRabbit(sim, x, y, brain, startEnergy = ENERGY_START, generation = 0) {
+export function spawnRabbit(sim, x, y, brain, startEnergy = ENERGY_START, generation = 0, genes = null) {
+  const senseGenes = genes || createRabbitGenes(Math.random)
   const rabbit = {
     id: nextRabbitId++,
     x,
@@ -151,6 +207,39 @@ export function spawnRabbit(sim, x, y, brain, startEnergy = ENERGY_START, genera
     gestationRemaining: 0,
     generation,
     brain: brain || createBrain(Math.random),
+    // The sense half of the genome: how far it hears and how far its own
+    // alarm call carries (see ./rabbit.js). Separate from the brain because
+    // ears are hardware, not an opinion the net can hold.
+    genes: senseGenes,
+    // Derived once at birth rather than per tick: genes never change during a
+    // life, and hearCalls below reads every *other* rabbit's senses on every
+    // decision tick - deriving them there is an allocation per pair of
+    // rabbits per tick, which a big warren feels.
+    senses: rabbitStats(senseGenes),
+    // Burrow state (see ./burrow.js): the id of the burrow it is currently
+    // inside, or null when it's above ground.
+    burrowId: null,
+    shelterTicks: 0,
+    quietTicks: 0,
+    digging: false,
+    // Alarm call this rabbit is currently making, with the position of the
+    // thing it is calling about. Two channels, because "there is a fox at
+    // X" and "there is a burrow at Y" are different messages and a rabbit
+    // that has just bolted underground is sending both.
+    alarmUntil: 0,
+    alarmX: 0,
+    alarmY: 0,
+    burrowCallUntil: 0,
+    burrowCallX: 0,
+    burrowCallY: 0,
+    // Strength (0..1) of the loudest call it can currently hear, kept on the
+    // entity so the renderer and inspector can show a rabbit reacting to
+    // something it cannot see itself.
+    alarmHeard: 0,
+    // True when the fox it is reacting to was picked up by ear alone - the
+    // panel says "heard a fox" rather than "fleeing" for it, which is the
+    // clearest way to show hearing doing something sight couldn't.
+    heardOnly: false,
     // Current search-mode heading (radians) and how many decision ticks are
     // left before it's re-randomized. ticksLeft starts at 0 so the first
     // search tick picks a fresh heading immediately rather than reusing this
@@ -224,34 +313,104 @@ function findNearestApple(sim, x, y) {
   return bestX < 0 ? null : { x: bestX, y: bestY, dist: bestDist }
 }
 
+/** How much noise a fox is making right now, as a multiplier on how far it
+ * can be heard. Sprinting gives it away; standing over a carcass doesn't. */
+function foxNoiseFactor(fox) {
+  if (fox.sprinting) return FOX_NOISE_SPRINTING
+  if (fox.feedingRemaining > 0) return FOX_NOISE_FEEDING
+  return FOX_NOISE_PROWLING[0] + (FOX_NOISE_PROWLING[1] - FOX_NOISE_PROWLING[0]) * fox.genes.speed
+}
+
 /**
- * The nearest fox this rabbit can actually see. Each fox is checked against
- * its *own* spotting range - PREY_ALERT_RADIUS shrunk by its camouflage
- * gene - so a well-camouflaged fox stays invisible to the rabbit's brain
- * (its predator inputs read "nothing there") until it is much closer, which
- * is exactly what the camouflage gene is buying.
+ * The nearest fox this rabbit has detected, by either sense, and which sense
+ * found it.
+ *
+ * *Sight* checks each fox against its own spotting range - PREY_ALERT_RADIUS
+ * shrunk by its camouflage gene - so a well-camouflaged fox stays invisible
+ * until it is much closer, which is exactly what camouflage buys.
+ *
+ * *Hearing* (issue #14) is the longer sense and the one camouflage cannot
+ * beat: a rabbit's ears reach 7-13 tiles depending on its `hearing` gene
+ * versus 6 tiles of sight, scaled only by how much noise the fox is making.
+ * That ordering is deliberate - it means a rabbit normally learns about a fox
+ * while it still has room to run, and a stalking fox has to rely on being
+ * quiet rather than on being invisible.
  */
-function findNearestVisibleFox(sim, rabbit) {
+function findNearestDetectedFox(sim, rabbit, stats) {
   let best = null
   let bestDist = Infinity
+  let bestHeard = false
   for (const fox of sim.foxes) {
     if (!fox.alive) continue
     const dx = fox.x - rabbit.x
     const dy = fox.y - rabbit.y
     const dist = Math.hypot(dx, dy)
-    if (dist > PREY_ALERT_RADIUS * foxStats(fox.genes).stealthFactor || dist >= bestDist) continue
+    if (dist >= bestDist) continue
+    const seen = dist <= PREY_ALERT_RADIUS * foxStats(fox.genes).stealthFactor
+    const heard = dist <= stats.hearingRadius * foxNoiseFactor(fox)
+    if (!seen && !heard) continue
     bestDist = dist
     best = fox
+    bestHeard = !seen
   }
-  return best ? { fox: best, x: best.x, y: best.y, dist: bestDist } : null
+  return best ? { fox: best, x: best.x, y: best.y, dist: bestDist, heardOnly: bestHeard } : null
 }
 
-/** The nearest live rabbit within a fox's (gene-derived) vision radius. */
+/**
+ * What this rabbit can hear other rabbits shouting about: the loudest alarm
+ * call in range and the nearest broadcast burrow location. Range is a
+ * property of both ends (see alarmReach in ./rabbit.js) - a loud caller and
+ * sharp ears - so communication is something a warren gets better at over
+ * generations rather than a fixed radius.
+ */
+function hearCalls(sim, rabbit, stats) {
+  let strength = 0
+  let dangerX = null
+  let dangerY = null
+  let burrowX = null
+  let burrowY = null
+  let burrowDist = Infinity
+  for (const other of sim.rabbits) {
+    if (other === rabbit || !other.alive) continue
+    const dist = Math.hypot(other.x - rabbit.x, other.y - rabbit.y)
+    const reach = alarmReach(other.senses, stats)
+    if (dist > reach) continue
+    const loudness = 1 - dist / reach
+    if (other.alarmUntil > sim.clock && loudness > strength) {
+      strength = loudness
+      dangerX = other.alarmX
+      dangerY = other.alarmY
+    }
+    if (other.burrowCallUntil > sim.clock && dist < burrowDist) {
+      burrowDist = dist
+      burrowX = other.burrowCallX
+      burrowY = other.burrowCallY
+    }
+  }
+  return { strength, dangerX, dangerY, burrowX, burrowY }
+}
+
+/**
+ * Where this rabbit thinks the nearest usable burrow is: one it can see the
+ * entrance of, or one another rabbit has just called out the location of.
+ * Called-out burrows are how a rabbit ends up at a hole it has never been
+ * near - the "get in the burrow" half of issue #14's communication.
+ */
+function knownBurrow(sim, rabbit, calls) {
+  const seen = nearestBurrow(sim.burrows, rabbit.x, rabbit.y, BURROW_SENSE_RADIUS)
+  if (seen) return seen
+  if (calls.burrowX == null) return null
+  const called = sim.burrows.find((b) => b.x === calls.burrowX && b.y === calls.burrowY)
+  return called && hasSpace(called) ? called : null
+}
+
+/** The nearest live rabbit within a fox's (gene-derived) vision radius.
+ * Rabbits underground are simply not there as far as a fox is concerned. */
 function findNearestPrey(sim, fox, visionRadius) {
   let best = null
   let bestDist = Infinity
   for (const rabbit of sim.rabbits) {
-    if (!rabbit.alive) continue
+    if (!rabbit.alive || rabbit.burrowId != null) continue
     const dist = Math.hypot(rabbit.x - fox.x, rabbit.y - fox.y)
     if (dist > visionRadius || dist >= bestDist) continue
     bestDist = dist
@@ -324,25 +483,143 @@ const NEIGHBOR_OFFSETS = [
 function finishGestation(sim, rabbit) {
   rabbit.gestating = false
   const childBrain = mutateBrain(rabbit.brain, Math.random)
+  const childGenes = mutateRabbitGenes(rabbit.genes, Math.random)
   const childGen = rabbit.generation + 1
   for (const [dx, dy] of NEIGHBOR_OFFSETS) {
     const nx = rabbit.x + dx
     const ny = rabbit.y + dy
     if (isPlaceable(sim.map, nx, ny)) {
-      spawnRabbit(sim, nx, ny, childBrain, CHILD_START_ENERGY, childGen)
+      spawnRabbit(sim, nx, ny, childBrain, CHILD_START_ENERGY, childGen, childGenes)
       return
     }
   }
   // No free neighboring tile - fall back to the parent's own tile.
-  spawnRabbit(sim, rabbit.x, rabbit.y, childBrain, CHILD_START_ENERGY, childGen)
+  spawnRabbit(sim, rabbit.x, rabbit.y, childBrain, CHILD_START_ENERGY, childGen, childGenes)
+}
+
+// ============================ Going to ground ============================
+
+/** Shout, so rabbits that haven't detected the fox themselves still get to
+ * react to it. Both channels are position-carrying: a warning is only useful
+ * if it says *where*. */
+function callAlarm(sim, rabbit, x, y) {
+  rabbit.alarmUntil = sim.clock + ALARM_CALL_MS
+  rabbit.alarmX = x
+  rabbit.alarmY = y
+}
+
+function callBurrow(sim, rabbit, burrow) {
+  rabbit.burrowCallUntil = sim.clock + ALARM_CALL_MS
+  rabbit.burrowCallX = burrow.x
+  rabbit.burrowCallY = burrow.y
+}
+
+function foxNearTile(sim, x, y, radius) {
+  return sim.foxes.some((f) => f.alive && Math.hypot(f.x - x, f.y - y) <= radius)
+}
+
+/**
+ * Dig a new burrow under this rabbit. Returns the burrow, or null if this
+ * tile won't take one.
+ *
+ * Digging does *not* put the rabbit underground by itself: a bolt-hole dug
+ * in peacetime is infrastructure, and diving into it the moment it's
+ * finished would mean a rabbit that never eats (it can't, down there) for no
+ * reason at all - which cost the population far more than the foxes did when
+ * this first went in. Only `hideIn` (i.e. an actual threat) sends it down.
+ */
+function tryDigBurrow(sim, rabbit, hideIn) {
+  if (rabbit.energy <= BURROW_BUILD_ENERGY + BURROW_BUILD_RESERVE) return null
+  if (isWaterTile(sim.map, rabbit.x, rabbit.y)) return null // a flooded burrow is no burrow
+  if (!canDigAt(sim.burrows, rabbit.x, rabbit.y)) return null
+  const burrow = createBurrow(rabbit.x, rabbit.y, rabbit.id)
+  sim.burrows.push(burrow)
+  rabbit.energy -= BURROW_BUILD_ENERGY
+  rabbit.digging = true
+  if (hideIn) enterBurrow(burrow, rabbit)
+  callBurrow(sim, rabbit, burrow)
+  return burrow
+}
+
+function currentBurrow(sim, rabbit) {
+  return rabbit.burrowId == null ? null : sim.burrows.find((b) => b.id === rabbit.burrowId) || null
+}
+
+/**
+ * One decision tick for a rabbit that is underground. It cannot eat, cannot
+ * be seen and cannot be caught - so the only question is when to come back
+ * up, and the answer is "when it is quiet, or when staying down any longer
+ * would starve it".
+ *
+ * Coming up into a fox standing on the entrance would make burrows a trap
+ * rather than a refuge, so a rabbit forced up by hunger takes the tunnels
+ * first and surfaces at a connected burrow if the network offers a safer
+ * mouth. That is the entire point of digging near an existing warren.
+ */
+function runShelteredTick(sim, rabbit, burrow, out, threat) {
+  rabbit.running = false
+  rabbit.searching = false
+  rabbit.resting = true
+  rabbit.fleeing = false
+  rabbit.shelterTicks += 1
+  rabbit.quietTicks = threat ? 0 : rabbit.quietTicks + 1
+  if (threat) callAlarm(sim, rabbit, threat.x, threat.y)
+  callBurrow(sim, rabbit, burrow)
+
+  if (rabbit.shelterTicks < SHELTER_MIN_TICKS) return
+  const starving = rabbit.energy <= SHELTER_HUNGRY_ENERGY
+  // Nothing detected for a while means "come up and eat", regardless of how
+  // strongly this genome likes cover: `hide` decides whether to take shelter
+  // from something, not whether to sit underground while the field is empty.
+  // (Gating the all-clear on it made most lineages stay down until they were
+  // starving, which cost the population more than the foxes ever did.)
+  const allClear = rabbit.quietTicks >= SHELTER_ALL_CLEAR_TICKS
+  if (!starving && !allClear) return
+
+  if (foxNearTile(sim, burrow.x, burrow.y, BURROW_MOUTH_DANGER)) {
+    const escape = linkedBurrows(sim.burrows, burrow).find(
+      (b) => hasSpace(b) && !foxNearTile(sim, b.x, b.y, BURROW_MOUTH_DANGER),
+    )
+    if (escape) {
+      leaveBurrow(sim.burrows, rabbit)
+      enterBurrow(escape, rabbit)
+      rabbit.shelterTicks = 0
+      return
+    }
+    // No tunnel out and not yet desperate: sit tight rather than surface
+    // into the fox's mouth.
+    if (!starving) return
+  }
+  leaveBurrow(sim.burrows, rabbit)
+  rabbit.shelterTicks = 0
 }
 
 const MOVE_DEADZONE = 0.3
 
 function runDecisionTick(sim, rabbit) {
   const { map } = sim
-  const apple = findNearestApple(sim, rabbit.x, rabbit.y)
-  const fox = findNearestVisibleFox(sim, rabbit)
+  const stats = rabbit.senses
+  const sheltered = currentBurrow(sim, rabbit)
+  // Underground it can still hear, but it can't see the surface - no apples,
+  // no watching the fox it's hiding from.
+  const apple = sheltered ? null : findNearestApple(sim, rabbit.x, rabbit.y)
+  const detected = findNearestDetectedFox(sim, rabbit, stats)
+  const calls = hearCalls(sim, rabbit, stats)
+  rabbit.alarmHeard = calls.strength
+
+  // A fox someone else called out counts as a threat even when this rabbit
+  // has picked up nothing itself - that second-hand knowledge is the whole
+  // point of an alarm call. Its own senses win when both are available,
+  // since they're current and a call is a moment old.
+  rabbit.heardOnly = !!detected && detected.heardOnly
+  const threat = detected
+    ? { x: detected.x, y: detected.y, dist: detected.dist, firsthand: true }
+    : calls.dangerX != null
+      ? { x: calls.dangerX, y: calls.dangerY, dist: Math.hypot(calls.dangerX - rabbit.x, calls.dangerY - rabbit.y), firsthand: false }
+      : null
+  if (detected) callAlarm(sim, rabbit, detected.x, detected.y)
+
+  const cover = sheltered ? null : knownBurrow(sim, rabbit, calls)
   const inputs = [
     1,
     rabbit.energy / ENERGY_MAX,
@@ -351,24 +628,83 @@ function runDecisionTick(sim, rabbit) {
     apple ? apple.dist / VISION_RADIUS : 1,
     isWaterTile(map, rabbit.x, rabbit.y) ? 1 : 0,
     Math.random() * 2 - 1,
-    fox ? (fox.x - rabbit.x) / PREY_ALERT_RADIUS : 0,
-    fox ? (fox.y - rabbit.y) / PREY_ALERT_RADIUS : 0,
-    fox ? fox.dist / PREY_ALERT_RADIUS : 1,
+    threat ? (threat.x - rabbit.x) / PREY_ALERT_RADIUS : 0,
+    threat ? (threat.y - rabbit.y) / PREY_ALERT_RADIUS : 0,
+    threat ? Math.min(2, threat.dist / PREY_ALERT_RADIUS) : 1,
+    calls.strength,
+    // Only reported while something is actually after it - the same "reads
+    // as nothing there" convention the fox inputs use. A permanently-on
+    // burrow vector turned out to be actively harmful: once a warren
+    // existed, every calm rabbit had a constant extra signal running through
+    // random weights, which flipped a large share of the population's
+    // breeding gate off and cut the no-fox carrying capacity by two thirds.
+    // Where the nearest hole is only matters when you need it.
+    cover && threat ? (cover.x - rabbit.x) / BURROW_SENSE_RADIUS : 0,
+    cover && threat ? (cover.y - rabbit.y) / BURROW_SENSE_RADIUS : 0,
+    sheltered ? 1 : 0,
   ]
   const out = think(rabbit.brain, inputs)
+
+  if (sheltered) {
+    runShelteredTick(sim, rabbit, sheltered, out, threat)
+    return
+  }
+
   rabbit.running = out.run > 0.5
+  rabbit.digging = false
+  rabbit.shelterTicks = 0
+  rabbit.quietTicks = threat ? 0 : rabbit.quietTicks + 1
 
   const blind = !apple
   const hungry = rabbit.energy < HUNGRY_ENERGY
 
   // Fleeing outranks everything below it - a rabbit that keeps grazing with
   // a fox on top of it doesn't get to have opinions about food for long.
-  // Point-blank (PANIC_RADIUS) is a hardwired reflex; further out it's the
+  // Point-blank (PANIC_RADIUS) is a hardwired reflex; so is a loud alarm
+  // call from a rabbit that *can* see it, for the same reason - a warren
+  // where nobody reacts to the alarm is a warren that gets eaten before
+  // selection can teach it otherwise. Everything quieter than that is the
   // genome's own `flee` output deciding, which is where the real trade-off
   // lives: bolting early is safe but burns energy and abandons food, so
   // both "jumpy" and "steady" lineages are viable depending on how much
   // pressure the foxes are actually applying.
-  rabbit.fleeing = !!fox && (fox.dist <= PANIC_RADIUS || out.flee > 0.5)
+  const reflexPanic = !!threat && (threat.firsthand ? threat.dist <= PANIC_RADIUS : calls.strength >= ALARM_PANIC_STRENGTH)
+  rabbit.fleeing = !!threat && (reflexPanic || out.flee > 0.5)
+
+  // Going to ground: the alternative to outrunning a fox (issue #14). It is
+  // gated on the brain's own `hide` output - founders start biased toward
+  // yes, and a lineage can evolve away from it - and only ever happens under
+  // threat, or calmly with energy to spare, which is how warrens get dug
+  // before they're needed.
+  // ...unless it is already starving. A rabbit that dives back down the
+  // moment it surfaces would never eat again: it would flap between hunger
+  // pushing it out and fear pulling it back until it died underground,
+  // holding a burrow slot the whole time. Below the shelter-hunger line,
+  // finding food outranks safety - the same "hunger is a hard instinct"
+  // rule that governs resting.
+  const wantsCover = out.hide > 0.5 && rabbit.energy > SHELTER_HUNGRY_ENERGY
+  if (wantsCover && (threat || (!cover && rabbit.energy >= BURROW_DIG_CALM_ENERGY))) {
+    if (cover && Math.max(Math.abs(cover.x - rabbit.x), Math.abs(cover.y - rabbit.y)) <= 1) {
+      if (enterBurrow(cover, rabbit)) {
+        callBurrow(sim, rabbit, cover)
+        rabbit.running = false
+        rabbit.fleeing = false
+        rabbit.searching = false
+        rabbit.resting = true
+        rabbit.shelterTicks = 0
+        return
+      }
+    } else if (!cover) {
+      const dug = tryDigBurrow(sim, rabbit, !!threat)
+      if (dug && rabbit.burrowId != null) {
+        rabbit.running = false
+        rabbit.fleeing = false
+        rabbit.searching = false
+        rabbit.resting = true
+        return
+      }
+    }
+  }
 
   // Hunger is a hard instinct, not a suggestion the brain can outvote: a
   // starving rabbit never just sits out a "rest" decision, whether or not
@@ -404,12 +740,22 @@ function runDecisionTick(sim, rabbit) {
 
   let moveX = out.moveX
   let moveY = out.moveY
-  if (rabbit.fleeing) {
+  const boltingForCover = rabbit.fleeing && wantsCover && cover
+  if (boltingForCover) {
+    // Running *to* something rather than away from it: a rabbit heading for
+    // a hole beats a rabbit heading for the horizon, because the chase ends
+    // when it arrives instead of when the fox is faster.
+    const dx = cover.x - rabbit.x
+    const dy = cover.y - rabbit.y
+    const len = Math.hypot(dx, dy) || 1
+    moveX = dx / len
+    moveY = dy / len
+  } else if (rabbit.fleeing) {
     // Straight away from the fox. Terrain still applies - attemptStep won't
     // walk it into the ocean - so a rabbit can be cornered against water,
     // which is where a fast fox earns its meal.
-    const dx = rabbit.x - fox.x
-    const dy = rabbit.y - fox.y
+    const dx = rabbit.x - threat.x
+    const dy = rabbit.y - threat.y
     const len = Math.hypot(dx, dy)
     if (len === 0) {
       // Sharing a tile with the fox: there's no "away" vector to follow, so
@@ -521,7 +867,10 @@ function moveFox(sim, fox, moveX, moveY, tilesPerTick) {
 function tryPounce(sim, fox, stats) {
   if (!fox.hunting) return
   for (const rabbit of sim.rabbits) {
-    if (!rabbit.alive) continue
+    // Underground is out of reach: a fox can stand on the entrance all it
+    // likes (and that does keep the rabbit down there, starving), but it
+    // cannot dig one out.
+    if (!rabbit.alive || rabbit.burrowId != null) continue
     if (Math.abs(rabbit.x - fox.x) > POUNCE_RANGE || Math.abs(rabbit.y - fox.y) > POUNCE_RANGE) continue
     rabbit.alive = false
     rabbit.energy = 0
@@ -569,7 +918,14 @@ function runFoxDecisionTick(sim, fox) {
     return
   }
 
-  const prey = findNearestPrey(sim, fox, stats.visionRadius)
+  // Forest cover cuts a fox's vision by 45% (issue #14): under a canopy it
+  // is hunting by luck as much as by eyesight, which is what turns woodland
+  // into somewhere a rabbit can plausibly live rather than just the place
+  // the apples are. Measured from the tile the *fox* is standing on - it's
+  // the fox's own sightlines the trees are blocking.
+  const inForest = sim.map.tileType[fox.y * sim.map.size + fox.x] === TILE.FOREST
+  const visionRadius = stats.visionRadius * (inForest ? FOREST_VISION_FACTOR : 1)
+  const prey = findNearestPrey(sim, fox, visionRadius)
   const packmate = findNearestPackmate(sim, fox, stats.packRadius)
   fox.packing = !!packmate
   // "Desire to hunt": a high-bloodlust fox's threshold sits above its own
@@ -662,7 +1018,7 @@ function regrowApples(sim) {
 // can show how the gene pool is drifting over time rather than just a
 // single rabbit's wiring. Cheap: the net is tiny and this only runs a few
 // times a minute.
-const RABBIT_TRAIT_KEYS = ['foodDrive', 'wanderer', 'boldness', 'restfulness', 'broodiness', 'searchDrive', 'skittishness']
+const RABBIT_TRAIT_KEYS = ['foodDrive', 'wanderer', 'boldness', 'restfulness', 'broodiness', 'searchDrive', 'skittishness', 'burrowInstinct', 'heedsAlarm']
 
 /** Population-wide averages of the fox genes, or null with no foxes alive -
  * null rather than zeros so the chart can tell "no foxes" apart from "foxes
@@ -674,6 +1030,19 @@ function averageFoxGenes(foxes) {
     let sum = 0
     for (const f of foxes) sum += f.genes[key]
     avg[key] = sum / foxes.length
+  }
+  return avg
+}
+
+/** Population-wide averages of the rabbits' sense genes, or null with no
+ * rabbits alive - same null-vs-zeros reasoning as averageFoxGenes. */
+function averageRabbitGenes(rabbits) {
+  if (rabbits.length === 0) return null
+  const avg = {}
+  for (const key of RABBIT_GENE_KEYS) {
+    let sum = 0
+    for (const r of rabbits) sum += r.genes[key]
+    avg[key] = sum / rabbits.length
   }
   return avg
 }
@@ -691,6 +1060,11 @@ function sampleTraitHistory(sim) {
     foxMinGen: null,
     foxMaxGen: null,
     foxGenes: averageFoxGenes(foxes),
+    // The warren, as a population-level statistic: how much shelter exists
+    // and how much of it is in use right now.
+    burrows: sim.burrows.length,
+    sheltered: rabbits.filter((r) => r.burrowId != null).length,
+    rabbitGenes: averageRabbitGenes(rabbits),
   }
   for (const key of RABBIT_TRAIT_KEYS) sample[key] = 0
 
@@ -731,7 +1105,14 @@ export function stepSimulation(sim, dtMs) {
   for (const fox of sim.foxes) {
     if (fox.alive) stepFox(sim, fox, dtMs)
   }
-  if (sim.rabbits.some((r) => !r.alive)) sim.rabbits = sim.rabbits.filter((r) => r.alive)
+  if (sim.rabbits.some((r) => !r.alive)) {
+    // Free the burrow slot of anything that died underground, or the warren
+    // would silently fill up with ghosts and stop taking the living.
+    for (const r of sim.rabbits) {
+      if (!r.alive && r.burrowId != null) leaveBurrow(sim.burrows, r)
+    }
+    sim.rabbits = sim.rabbits.filter((r) => r.alive)
+  }
   if (sim.foxes.some((f) => !f.alive)) sim.foxes = sim.foxes.filter((f) => f.alive)
   const selectedList = sim.selectedKind === 'fox' ? sim.foxes : sim.rabbits
   if (sim.selectedId != null && !selectedList.some((c) => c.id === sim.selectedId)) selectCreature(sim, null, null)

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { createBrain, think, mutateBrain, INPUT_SIZE, HIDDEN_SIZE, OUTPUT_SIZE } from './brain.js'
+import { createBrain, think, mutateBrain, INPUT_SIZE, HIDDEN_SIZE, OUTPUT_SIZE, WEIGHT_CLAMP } from './brain.js'
 import { mulberry32 } from '../worldgen/mapgen.js'
 
 describe('createBrain', () => {
@@ -21,13 +21,14 @@ describe('createBrain', () => {
 
 describe('think', () => {
   const brain = createBrain(mulberry32(7))
-  // bias, energy, apple dx/dy/dist, onWater, noise, fox dx/dy/dist - "no
-  // apple and no fox visible" reads as distance 1 for both.
-  const neutralInputs = [1, 0.5, 0, 0, 1, 0, 0, 0, 0, 1]
+  // bias, energy, apple dx/dy/dist, onWater, noise, fox dx/dy/dist, alarm
+  // call, burrow dx/dy, underground - "no apple and no fox detected" reads
+  // as distance 1 for both, and nothing heard, no burrow known, above ground.
+  const neutralInputs = [1, 0.5, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0]
 
-  it('returns all seven expected outputs', () => {
+  it('returns all eight expected outputs', () => {
     const out = think(brain, neutralInputs)
-    expect(Object.keys(out).sort()).toEqual(['moveX', 'moveY', 'reproduceDesire', 'rest', 'run', 'searchDrive', 'flee'].sort())
+    expect(Object.keys(out).sort()).toEqual(['moveX', 'moveY', 'reproduceDesire', 'rest', 'run', 'searchDrive', 'flee', 'hide'].sort())
   })
 
   it('keeps outputs within their activation ranges', () => {
@@ -36,7 +37,7 @@ describe('think', () => {
     expect(out.moveX).toBeLessThanOrEqual(1)
     expect(out.moveY).toBeGreaterThanOrEqual(-1)
     expect(out.moveY).toBeLessThanOrEqual(1)
-    for (const key of ['run', 'rest', 'reproduceDesire', 'searchDrive', 'flee']) {
+    for (const key of ['run', 'rest', 'reproduceDesire', 'searchDrive', 'flee', 'hide']) {
       expect(out[key]).toBeGreaterThanOrEqual(0)
       expect(out[key]).toBeLessThanOrEqual(1)
     }
@@ -49,15 +50,25 @@ describe('think', () => {
   })
 
   it('produces different output for different inputs', () => {
-    const a = think(brain, [1, 0.9, 1, 1, 0.1, 0, 0, 0, 0, 1])
-    const b = think(brain, [1, 0.1, -1, -1, 1, 1, 0, 0, 0, 1])
+    const a = think(brain, [1, 0.9, 1, 1, 0.1, 0, 0, 0, 0, 1, 0, 0, 0, 0])
+    const b = think(brain, [1, 0.1, -1, -1, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0])
     expect(a).not.toEqual(b)
   })
 
   it('reacts to the predator inputs, not just the food ones', () => {
-    const noFox = think(brain, [1, 0.5, 0, 0, 1, 0, 0, 0, 0, 1])
-    const foxAdjacent = think(brain, [1, 0.5, 0, 0, 1, 0, 0, -0.2, -0.2, 0.2])
+    const noFox = think(brain, [1, 0.5, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0])
+    const foxAdjacent = think(brain, [1, 0.5, 0, 0, 1, 0, 0, -0.2, -0.2, 0.2, 0, 0, 0, 0])
     expect(foxAdjacent).not.toEqual(noFox)
+  })
+
+  it('reacts to another rabbit’s alarm call and to a burrow in reach', () => {
+    // The issue #14 inputs: a rabbit can respond to danger it has not
+    // perceived itself, and to shelter it knows about.
+    const quiet = think(brain, [1, 0.5, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0])
+    const alarmed = think(brain, [1, 0.5, 0, 0, 1, 0, 0, 0, 0, 1, 0.9, 0, 0, 0])
+    const nearBurrow = think(brain, [1, 0.5, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.3, -0.2, 0])
+    expect(alarmed).not.toEqual(quiet)
+    expect(nearBurrow).not.toEqual(quiet)
   })
 
   it('starts fresh brains biased toward fleeing rather than a coin flip', () => {
@@ -69,6 +80,17 @@ describe('think', () => {
       if (out.flee > 0.5) fleeing += 1
     }
     expect(fleeing).toBeGreaterThan(25)
+  })
+
+  it('starts fresh brains biased toward taking cover, so burrows get used at all', () => {
+    // HIDE_INITIAL_BIAS, same reasoning as fleeing: a lineage can evolve
+    // away from digging, but it has to start doing it first.
+    let hiding = 0
+    for (let seed = 0; seed < 40; seed++) {
+      const out = think(createBrain(mulberry32(seed)), neutralInputs)
+      if (out.hide > 0.5) hiding += 1
+    }
+    expect(hiding).toBeGreaterThan(25)
   })
 })
 
@@ -102,8 +124,8 @@ describe('mutateBrain', () => {
     const child = mutateBrain(parent, mulberry32(999))
     for (const arr of [child.w1, child.b1, child.w2, child.b2]) {
       for (const v of arr) {
-        expect(v).toBeGreaterThanOrEqual(-3)
-        expect(v).toBeLessThanOrEqual(3)
+        expect(v).toBeGreaterThanOrEqual(-WEIGHT_CLAMP)
+        expect(v).toBeLessThanOrEqual(WEIGHT_CLAMP)
       }
     }
   })

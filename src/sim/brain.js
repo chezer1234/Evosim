@@ -5,17 +5,21 @@
 // docs/plans/issue-2-species-rabbits.md for the reasoning.
 
 // bias, energy, dx/dy/dist-to-apple, onWater, noise, then dx/dy/dist to the
-// nearest fox the rabbit has spotted (see PREY_ALERT_RADIUS in
-// simulation.js) - predators are something a rabbit has to be able to *see*
-// before it can evolve any response to them.
-export const INPUT_SIZE = 10
+// nearest fox the rabbit has *detected* (by sight within PREY_ALERT_RADIUS
+// or, further out, by ear - see rabbit.js's hearing gene), then the three
+// inputs issue #14 added: how loud an alarm call it can hear from another
+// rabbit, where the nearest burrow it knows about is, and whether it is
+// currently underground. Predators are something a rabbit has to be able to
+// perceive - by whichever sense - before it can evolve any response to them.
+export const INPUT_SIZE = 14
 export const HIDDEN_SIZE = 8
-export const OUTPUT_SIZE = 7 // moveX, moveY, run, rest, reproduceDesire, searchDrive, flee
+export const OUTPUT_SIZE = 8 // moveX, moveY, run, rest, reproduceDesire, searchDrive, flee, hide
 // Indices within b2/w2 that are called out by name because createBrain
 // nudges their initial bias (see below) and simulation.js reads them as
 // genuine evolvable traits rather than hardcoded behavior.
 const SEARCH_DRIVE_OUTPUT = 5
 const FLEE_OUTPUT = 6
+const HIDE_OUTPUT = 7
 
 const WEIGHT_RANGE = 1.5
 // Freshly spawned brains start with searchDrive biased toward "yes" - real
@@ -24,14 +28,25 @@ const WEIGHT_RANGE = 1.5
 // a coin flip it has to discover. Random mutation can still push any given
 // lineage's search drive down (or further up) over generations; this just
 // sets the starting prior. See docs/plans/issue-2-species-rabbits.md.
-const SEARCH_DRIVE_INITIAL_BIAS = 1.2
+// Raised from 1.2 alongside the four inputs issue #14 added: a wider input
+// layer drives the hidden units harder, so their (random) contribution to
+// each output grew and a fixed bias bought a weaker prior than it used to.
+// These three numbers are calibrated against how often a fresh brain
+// actually says yes - see the "starts fresh brains biased toward..." tests.
+const SEARCH_DRIVE_INITIAL_BIAS = 2.0
 // Same idea for fleeing: a founder population that has to *discover* running
 // away from foxes would simply be eaten before selection could act, so fresh
 // brains start jumpy and a lineage has to evolve its way toward calm. (A
 // fox close enough to pounce triggers a hard panic override regardless - see
 // PANIC_RADIUS in simulation.js - so this gene governs the middle distance,
 // where bolting early is safe but costs foraging time.)
-const FLEE_INITIAL_BIAS = 1.2
+const FLEE_INITIAL_BIAS = 2.0
+// And the same again for going to ground. A burrow costs 7 energy to dig and
+// stops the rabbit eating while it's down there, so "hide" is a genuine
+// trade-off a lineage can evolve away from - but a founder population that
+// had to *discover* using the holes it can dig would be eaten first, and the
+// mechanic would never show up in a run at all. Starts on, evolves off.
+const HIDE_INITIAL_BIAS = 1.8
 
 function randWeight(rng) {
   return (rng() * 2 - 1) * WEIGHT_RANGE
@@ -50,6 +65,7 @@ export function createBrain(rng) {
   for (let i = 0; i < b2.length; i++) b2[i] = randWeight(rng)
   b2[SEARCH_DRIVE_OUTPUT] += SEARCH_DRIVE_INITIAL_BIAS
   b2[FLEE_OUTPUT] += FLEE_INITIAL_BIAS
+  b2[HIDE_OUTPUT] += HIDE_INITIAL_BIAS
   return { w1, b1, w2, b2 }
 }
 
@@ -89,14 +105,18 @@ export function think(brain, inputs) {
     reproduceDesire: sigmoid(out[4]),
     searchDrive: sigmoid(out[5]),
     flee: sigmoid(out[6]),
+    hide: sigmoid(out[7]),
   }
 }
 
 const MUTATION_RATE = 0.15
 const MUTATION_STDDEV = 0.35
 // Exported so the brain-diagram UI can normalize edge weights against the
-// same ceiling mutation is clamped to, instead of guessing a scale.
-export const WEIGHT_CLAMP = 3
+// same ceiling mutation is clamped to, instead of guessing a scale. It has
+// to leave room for a founder's own starting bias (WEIGHT_RANGE plus the
+// largest initial bias above, i.e. 3.5), or a fresh brain would be born
+// outside the range its own children are clamped to.
+export const WEIGHT_CLAMP = 4
 
 function clamp(v, lo, hi) {
   return Math.min(hi, Math.max(lo, v))

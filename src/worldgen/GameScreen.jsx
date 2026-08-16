@@ -3,6 +3,7 @@ import { drawMap } from './mapgen.js'
 import { createSimulation, isPlaceable, selectCreature, spawnFox, spawnRabbit, stepSimulation } from '../sim/simulation.js'
 import { drawSimulation } from '../sim/render.js'
 import { computeTraits, describeEnergyEffects, describeTraits } from '../sim/brainInsight.js'
+import { describeRabbitSenses } from '../sim/rabbit.js'
 import RabbitInsights from './RabbitInsights.jsx'
 import FoxInsights from './FoxInsights.jsx'
 import PopulationPanel from './PopulationPanel.jsx'
@@ -60,6 +61,12 @@ function buildInsightsData(sim) {
         fleeing: rabbit.fleeing,
         gestating: rabbit.gestating,
         brain: rabbit.brain,
+        genes: rabbit.genes,
+        senseNotes: describeRabbitSenses(rabbit.genes),
+        sheltered: rabbit.burrowId != null,
+        calling: rabbit.alarmUntil > sim.clock,
+        alarmHeard: rabbit.alarmHeard,
+        heardOnly: rabbit.heardOnly,
         traits,
         blurb: describeTraits(traits),
         energyEffects: describeEnergyEffects(traits),
@@ -91,6 +98,8 @@ function buildInsightsData(sim) {
     population: rabbits.length,
     foxPopulation: foxes.length,
     kills: sim.kills,
+    burrows: sim.burrows.length,
+    sheltered: rabbits.filter((r) => r.burrowId != null).length,
     generationRange: generationRangeOf(rabbits),
     foxGenerationRange: generationRangeOf(foxes),
   }
@@ -833,6 +842,8 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
               population={insightsData?.population ?? counts.rabbits}
               foxPopulation={insightsData?.foxPopulation ?? counts.foxes}
               kills={insightsData?.kills ?? counts.kills}
+              burrows={insightsData?.burrows ?? 0}
+              sheltered={insightsData?.sheltered ?? 0}
               history={insightsData?.history ?? []}
               generationRange={insightsData?.generationRange ?? null}
               foxGenerationRange={insightsData?.foxGenerationRange ?? null}

@@ -6,6 +6,7 @@
 
 import { TRAIT_META } from '../sim/brainInsight.js'
 import { FOX_GENE_META } from '../sim/fox.js'
+import { RABBIT_GENE_META } from '../sim/rabbit.js'
 import { CloseButton, PANEL_SHELL } from './panelChrome.jsx'
 
 /** A 0..1 trend line. `valueOf` pulls the number out of a sample so this
@@ -41,7 +42,7 @@ function TrendRow({ label, history, valueOf, color }) {
   )
 }
 
-const TREND_KEYS = ['foodDrive', 'searchDrive', 'broodiness', 'skittishness']
+const TREND_KEYS = ['foodDrive', 'searchDrive', 'broodiness', 'skittishness', 'burrowInstinct', 'heedsAlarm']
 // The fox genes worth watching drift: the ones that decide whether the
 // rabbits get away.
 const FOX_TREND_KEYS = ['speed', 'vision', 'camouflage', 'bloodlust', 'packTendency']
@@ -93,9 +94,10 @@ function PopulationChart({ history }) {
 /** `mapInfo` carries the map's size/lakes/seed - shown here only when the
  * caller has nowhere else to put them, which on a compact screen is the case:
  * the phone toolbar has room for the live counts and nothing more. */
-export default function PopulationPanel({ population, foxPopulation, kills, history, generationRange, foxGenerationRange, mapInfo, onClose }) {
+export default function PopulationPanel({ population, foxPopulation, kills, burrows, sheltered, history, generationRange, foxGenerationRange, mapInfo, onClose }) {
   const latest = history[history.length - 1]
   const hasFoxTrend = history.some((s) => s.foxGenes)
+  const hasSenseTrend = history.some((s) => s.rabbitGenes)
 
   return (
     <div className={`${PANEL_SHELL} gap-2 border-neutral-800 p-3`}>
@@ -112,6 +114,13 @@ export default function PopulationPanel({ population, foxPopulation, kills, hist
         {foxGenerationRange ? ` · gen ${foxGenerationRange[0]}–${foxGenerationRange[1]}` : ''}
         {kills ? ` · ${kills} caught` : ''}
       </p>
+      {/* The warren the rabbits have dug for themselves - shown even at zero,
+          so "they haven't dug anything yet" is distinguishable from "this
+          panel doesn't track that". */}
+      <p className="text-xs text-neutral-400">
+        🕳 {burrows} burrow{burrows === 1 ? '' : 's'}
+        {sheltered ? ` · ${sheltered} underground` : ''}
+      </p>
       {latest ? (
         <div className="flex flex-col gap-2 rounded-sm border border-neutral-800 bg-neutral-950 p-2">
           <PopulationChart history={history} />
@@ -119,6 +128,17 @@ export default function PopulationPanel({ population, foxPopulation, kills, hist
             <TrendRow key={m.key} label={m.label} history={history} valueOf={(s) => s[m.key]} color={m.color} />
           ))}
           <p className="text-[10px] text-neutral-600">Averaged across every living rabbit, sampled every ~5s of sim time.</p>
+          {/* Ears and voices are genes, not brain weights (see sim/rabbit.js),
+              so they drift on their own track - and watching hearing creep up
+              under fox pressure is the clearest read on selection there is. */}
+          {hasSenseTrend ? (
+            <div className="flex flex-col gap-2 border-t border-neutral-800 pt-2">
+              <h3 className="text-[10px] font-semibold tracking-wide text-blue-300/80 uppercase">Rabbit senses</h3>
+              {RABBIT_GENE_META.map((m) => (
+                <TrendRow key={m.key} label={m.label} history={history} valueOf={(s) => s.rabbitGenes?.[m.key] ?? null} color={m.color} />
+              ))}
+            </div>
+          ) : null}
           {hasFoxTrend ? (
             <div className="flex flex-col gap-2 border-t border-neutral-800 pt-2">
               <h3 className="text-[10px] font-semibold tracking-wide text-orange-400/80 uppercase">Fox genes</h3>

@@ -32,7 +32,20 @@ export const FOX_GENE_KEYS = FOX_GENE_META.map((m) => m.key)
 // simulation by spawn luck instead of by selection. Mutation still reaches
 // the extremes over generations - that's the point - it just has to get
 // there.
-const FOUNDER_SPREAD = 0.34 // +/- around 0.5
+const FOUNDER_SPREAD = 0.34 // +/- around the gene's founder mean
+
+// Founder *weights* (issue #14): the foxes you drop on the map start
+// slower, hungrier and slower to breed than the 0.5 midpoint, because a
+// founder pack drawn at the middle of every range wiped the rabbits out
+// before the rabbit gene pool could respond at all. This is only the
+// starting prior - mutation is untouched and unbounded within 0..1, so a
+// lineage can still evolve back toward fast legs, a frugal gut or a short
+// gestation if the ecosystem rewards it. Genes not listed start at 0.5.
+const FOUNDER_MEAN = {
+  speed: 0.34, // slower off the mark; sprinting has to be evolved for
+  metabolism: 0.54, // burns down faster, so an unfed fox has less runway
+  fecundity: 0.28, // longer gestation and a higher bar to breed at all
+}
 
 const MUTATION_RATE = 0.3 // per gene, per birth
 const MUTATION_STDDEV = 0.09
@@ -52,7 +65,10 @@ function gaussian(rng) {
 /** A founder fox's genes, using `rng` (a 0..1 generator). */
 export function createFoxGenes(rng) {
   const genes = {}
-  for (const key of FOX_GENE_KEYS) genes[key] = clamp01(0.5 + (rng() * 2 - 1) * FOUNDER_SPREAD)
+  for (const key of FOX_GENE_KEYS) {
+    const mean = FOUNDER_MEAN[key] ?? 0.5
+    genes[key] = clamp01(mean + (rng() * 2 - 1) * FOUNDER_SPREAD)
+  }
   return genes
 }
 
@@ -80,12 +96,22 @@ export const FOX_ENERGY_MAX = 120
 const PROWL_TILES_PER_TICK = [0.3, 0.6] // at speed 0 -> 1
 const SPRINT_MULTIPLIER = 2.05
 const VISION_TILES = [4, 12]
-const KILL_ENERGY = [30, 62] // by metabolism: burns hot, but strips a carcass better
-const UPKEEP_PER_SEC = [0.34, 0.86] // by metabolism, before the gene surcharge
+// How much of its vision a fox keeps while standing in forest (issue #14):
+// under a canopy it loses 45% of its spotting range, which is what makes
+// woodland a place a rabbit can actually live rather than just the place the
+// apples are.
+export const FOREST_VISION_FACTOR = 0.55
+const KILL_ENERGY = [34, 68] // by metabolism: burns hot, but strips a carcass better
+// Raised from [0.34, 0.86] (issue #14). Foxes were cheap enough to run that
+// a single kill funded a long prowl, so the population compounded until the
+// rabbits were gone; now a fox spends most of a carcass just staying alive.
+const UPKEEP_PER_SEC = [0.38, 0.92] // by metabolism, before the gene surcharge
 const SPRINT_UPKEEP_MULTIPLIER = 2.2
 const SPRINT_TICKS = [14, 58] // by stamina - how long a chase can be pressed
-const BREED_ENERGY = [104, 76] // by fecundity: eager foxes breed at lower reserves
-const GESTATION_MS = [52000, 34000] // by fecundity
+// Both raised (issue #14): breeding costs more reserve and takes far longer,
+// so fox numbers lag their food supply instead of tracking it instantly.
+const BREED_ENERGY = [112, 84] // by fecundity: eager foxes breed at lower reserves
+const GESTATION_MS = [110000, 68000] // by fecundity
 
 /**
  * Everything the sim actually reads, derived from the 0..1 genes. Pure and
@@ -98,7 +124,13 @@ const GESTATION_MS = [52000, 34000] // by fecundity
  * driving every dial to 1.
  */
 export function foxStats(genes) {
-  const geneCost = 1 + 0.4 * genes.speed + 0.3 * genes.vision + 0.22 * genes.camouflage + 0.18 * genes.stamina
+  // Speed is priced quadratically rather than linearly (issue #14): a
+  // plodding fox pays about what it always did, but every step toward a
+  // full sprint gene costs disproportionately more, so "fast" has to be
+  // paid for in rabbits rather than being a free upgrade every lineage
+  // drifts into. At speed 1 the surcharge is 0.85 where it used to be 0.40.
+  const speedCost = 0.3 * genes.speed + 0.55 * genes.speed * genes.speed
+  const geneCost = 1 + speedCost + 0.3 * genes.vision + 0.22 * genes.camouflage + 0.18 * genes.stamina
   return {
     prowlTilesPerTick: lerp(PROWL_TILES_PER_TICK[0], PROWL_TILES_PER_TICK[1], genes.speed),
     sprintTilesPerTick: lerp(PROWL_TILES_PER_TICK[0], PROWL_TILES_PER_TICK[1], genes.speed) * SPRINT_MULTIPLIER,
@@ -160,7 +192,7 @@ export function describeFox(genes) {
 export function describeFoxStats(genes) {
   const s = foxStats(genes)
   return [
-    `Sees prey ${s.visionRadius.toFixed(1)} tiles away, and closes at ${s.sprintTilesPerTick.toFixed(2)} tiles/tick flat out (a running rabbit does 1.00).`,
+    `Sees prey ${s.visionRadius.toFixed(1)} tiles away - only ${(s.visionRadius * FOREST_VISION_FACTOR).toFixed(1)} under forest cover - and closes at ${s.sprintTilesPerTick.toFixed(2)} tiles/tick flat out (a running rabbit does 1.00).`,
     `Rabbits only notice it at ${Math.round(s.stealthFactor * 100)}% of their normal spotting range.`,
     `Burns ${s.upkeepPerSec.toFixed(2)} energy/sec prowling and gains ${Math.round(s.energyPerKill)} per kill, so it needs a rabbit every ~${Math.round(s.energyPerKill / s.upkeepPerSec)}s to break even.`,
     `Hunts whenever its energy is below ${Math.round(s.huntBelowEnergy)} (${levelWord(genes.bloodlust)} desire to hunt), and can press a chase for ${s.maxSprintTicks} ticks before it has to break off.`,

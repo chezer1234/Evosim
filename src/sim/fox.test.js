@@ -24,14 +24,45 @@ describe('createFoxGenes', () => {
     expect(createFoxGenes(mulberry32(9))).toEqual(createFoxGenes(mulberry32(9)))
   })
 
-  it('keeps founders near the middle of the range rather than at the extremes', () => {
+  it('keeps founders near their founder mean rather than at the extremes', () => {
     // Otherwise the first fox you place decides the simulation by spawn luck
     // instead of by selection (see FOUNDER_SPREAD).
+    const mean = { speed: 0.34, metabolism: 0.54, fecundity: 0.28 }
     for (let seed = 0; seed < 25; seed++) {
-      for (const value of Object.values(createFoxGenes(mulberry32(seed)))) {
-        expect(Math.abs(value - 0.5)).toBeLessThanOrEqual(0.34)
+      for (const [key, value] of Object.entries(createFoxGenes(mulberry32(seed)))) {
+        expect(Math.abs(value - (mean[key] ?? 0.5))).toBeLessThanOrEqual(0.34)
       }
     }
+  })
+
+  it('weights founders toward slow, hungry, slow-breeding foxes (issue #14)', () => {
+    // The spawn-time weight that stops a founder pack wiping the rabbits out
+    // before the rabbit gene pool can respond. Averaged over many founders,
+    // since any individual is still drawn across a wide spread.
+    const totals = { speed: 0, metabolism: 0, fecundity: 0, vision: 0 }
+    const n = 400
+    for (let seed = 0; seed < n; seed++) {
+      const g = createFoxGenes(mulberry32(seed))
+      for (const key of Object.keys(totals)) totals[key] += g[key]
+    }
+    expect(totals.speed / n).toBeLessThan(0.4)
+    expect(totals.metabolism / n).toBeGreaterThan(0.5)
+    expect(totals.fecundity / n).toBeLessThan(0.4)
+    // Genes the issue didn't ask to weight are untouched.
+    expect(totals.vision / n).toBeCloseTo(0.5, 1)
+  })
+
+  it('still lets mutation carry a lineage past its founder weighting', () => {
+    // The weight is a starting prior, not a cap: "this does not mean that
+    // mutations cannot happen to prevent changes such as lowering gestation
+    // periods" (issue #14).
+    let child = createFoxGenes(mulberry32(3))
+    let fastest = child.speed
+    for (let seed = 0; seed < 200; seed++) {
+      child = mutateFoxGenes(child, mulberry32(seed))
+      fastest = Math.max(fastest, child.speed)
+    }
+    expect(fastest).toBeGreaterThan(0.68) // beyond the founder range entirely
   })
 })
 
@@ -108,6 +139,30 @@ describe('foxStats', () => {
     // genes add, which is the thing stopping evolution driving every dial to 1.
     for (const key of ['speed', 'vision', 'camouflage', 'stamina']) maximal[key] = 1
     expect(foxStats(maximal).upkeepPerSec).toBeGreaterThan(foxStats(minimal).upkeepPerSec)
+  })
+
+  it('prices speed superlinearly, so evolving fast legs costs more than it used to', () => {
+    // Issue #14: "any higher speed if evolved should be more costly than it
+    // currently is". Same metabolism throughout, so this is purely the
+    // speed surcharge - and the *jump* from mid to top speed has to cost
+    // more than the jump from bottom to mid, which is what linear pricing
+    // could never express.
+    const lower = foxStats(genes({ speed: 0.5 })).upkeepPerSec - foxStats(genes({ speed: 0 })).upkeepPerSec
+    const upper = foxStats(genes({ speed: 1 })).upkeepPerSec - foxStats(genes({ speed: 0.5 })).upkeepPerSec
+    expect(upper).toBeGreaterThan(lower)
+  })
+
+  it('makes a fox expensive enough to run that a kill is not a windfall (issue #14)', () => {
+    // A mid fox has to eat roughly every half-minute to break even; before
+    // the rebalance one carcass funded well over a minute of prowling, which
+    // is what let fox numbers compound until the rabbits were gone.
+    const mid = foxStats(genes())
+    expect(mid.energyPerKill / mid.upkeepPerSec).toBeLessThan(60)
+  })
+
+  it('keeps litters slow: gestation is over a minute even for the most fecund', () => {
+    expect(foxStats(genes({ fecundity: 1 })).gestationMs).toBeGreaterThan(60000)
+    expect(foxStats(genes({ fecundity: 0 })).gestationMs).toBeGreaterThan(100000)
   })
 
   it('lets desire to hunt run from "only when starving" to "always"', () => {
