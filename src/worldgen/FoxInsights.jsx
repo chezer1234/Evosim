@@ -5,6 +5,8 @@
 // work out to in sim units (see describeFoxStats in sim/fox.js).
 
 import { FOX_GENE_META, describeFox, describeFoxStats, foxMenace } from '../sim/fox.js'
+import { CloseButton, PANEL_SHELL } from './panelChrome.jsx'
+import { useIsTouch } from './useIsCompact.js'
 
 function GeneBar({ label, value, color }) {
   const pct = Math.round(value * 100)
@@ -27,15 +29,14 @@ function statusLine(fox) {
 }
 
 export default function FoxInsights({ selected, onClose }) {
+  const touch = useIsTouch()
   const menace = selected ? foxMenace(selected.genes) : 0
 
   return (
-    <div className="pointer-events-auto flex max-h-full w-80 flex-col gap-4 overflow-y-auto rounded-lg border border-orange-900/60 bg-neutral-900/95 p-4 text-neutral-200 shadow-2xl shadow-black/40 backdrop-blur-sm">
+    <div className={`${PANEL_SHELL} gap-4 border-orange-900/60 p-4`}>
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-semibold text-neutral-100">🦊 Fox genes</h2>
-        <button type="button" onClick={onClose} aria-label="Close" className="text-neutral-500 transition hover:text-neutral-200">
-          ✕
-        </button>
+        <CloseButton onClose={onClose} />
       </div>
 
       {selected ? (
@@ -78,7 +79,7 @@ export default function FoxInsights({ selected, onClose }) {
           </p>
         </section>
       ) : (
-        <p className="text-[11px] text-neutral-600">Click a fox on the map to see its genes.</p>
+        <p className="text-[11px] text-neutral-600">{touch ? 'Tap' : 'Click'} a fox on the map to see its genes.</p>
       )}
     </div>
   )

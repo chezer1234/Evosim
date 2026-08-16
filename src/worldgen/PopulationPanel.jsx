@@ -6,6 +6,7 @@
 
 import { TRAIT_META } from '../sim/brainInsight.js'
 import { FOX_GENE_META } from '../sim/fox.js'
+import { CloseButton, PANEL_SHELL } from './panelChrome.jsx'
 
 /** A 0..1 trend line. `valueOf` pulls the number out of a sample so this
  * works for both flat rabbit traits and the nested fox gene averages. */
@@ -89,17 +90,18 @@ function PopulationChart({ history }) {
   )
 }
 
-export default function PopulationPanel({ population, foxPopulation, kills, history, generationRange, foxGenerationRange, onClose }) {
+/** `mapInfo` carries the map's size/lakes/seed - shown here only when the
+ * caller has nowhere else to put them, which on a compact screen is the case:
+ * the phone toolbar has room for the live counts and nothing more. */
+export default function PopulationPanel({ population, foxPopulation, kills, history, generationRange, foxGenerationRange, mapInfo, onClose }) {
   const latest = history[history.length - 1]
   const hasFoxTrend = history.some((s) => s.foxGenes)
 
   return (
-    <div className="pointer-events-auto flex w-64 flex-col gap-2 rounded-lg border border-neutral-800 bg-neutral-900/95 p-3 text-neutral-200 shadow-2xl shadow-black/40 backdrop-blur-sm">
+    <div className={`${PANEL_SHELL} gap-2 border-neutral-800 p-3`}>
       <div className="flex items-center justify-between">
         <h2 className="text-xs font-semibold tracking-wide text-neutral-100 uppercase">📈 Population</h2>
-        <button type="button" onClick={onClose} aria-label="Close" className="text-neutral-500 transition hover:text-neutral-200">
-          ✕
-        </button>
+        <CloseButton onClose={onClose} />
       </div>
       <p className="text-xs text-neutral-400">
         🐇 {population} rabbit{population === 1 ? '' : 's'}
@@ -129,6 +131,19 @@ export default function PopulationPanel({ population, foxPopulation, kills, hist
       ) : (
         <p className="text-[11px] text-neutral-600">A trend line appears once creatures have been alive a little while.</p>
       )}
+      {mapInfo ? (
+        <p className="flex flex-wrap gap-x-3 border-t border-neutral-800 pt-2 text-[10px] text-neutral-500">
+          <span>
+            Size <b className="font-mono text-neutral-300 tabular-nums">{mapInfo.size}×{mapInfo.size}</b>
+          </span>
+          <span>
+            Lakes <b className="font-mono text-neutral-300 tabular-nums">{mapInfo.lakeCount}</b>
+          </span>
+          <span>
+            Seed <b className="font-mono text-neutral-300 tabular-nums">{mapInfo.seed}</b>
+          </span>
+        </p>
+      ) : null}
     </div>
   )
 }

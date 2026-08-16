@@ -13,6 +13,7 @@ No install, no sign-up — it just opens and runs in your browser.
 - **Foxes** — the predator. Where a rabbit thinks with a neural net, a fox is a set of named, heritable dials: **speed, vision, camouflage, metabolism, desire to hunt, pack tendency, stamina and fecundity**. They stalk, sprint, pounce and feed; camouflaged ones get closer before the rabbits notice; pack-minded ones hunt together. Every gene costs energy to run, so a fox that's good at everything starves — click one to see its genome and what it works out to in practice.
 - **Rabbits can see them coming.** Their brains gained predator inputs and a `flee` output, so bolting early versus holding your nerve is something a lineage evolves, not something we scripted. A fox at point-blank range triggers panic regardless.
 - **Spawn palette** — pick a species, drop 1–10 per click, or scatter them across the island, then watch both populations rise and fall against each other in the Population panel.
+- **Works on a phone.** Pinch to zoom, drag to pan, tap a creature to read its brain or its genes. The controls rearrange themselves into a thumb-height tab bar and the panels become bottom sheets (or side panels, held sideways) — same simulation, same detail, just laid out for the screen you're on.
 
 More species and interactions are on the way.
 

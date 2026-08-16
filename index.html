@@ -3,7 +3,16 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- viewport-fit=cover lets the app paint under a phone's notch/home
+         indicator; the .safe-x / .safe-b rules in index.css keep the actual
+         controls out from under them. Page zoom is deliberately left enabled
+         (no maximum-scale) - the map has its own pinch handler, and blocking
+         browser zoom outright would break anyone who needs it to read. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#0a0a0a" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="description" content="An evolution simulator: generate a procedural island, drop in rabbits and foxes, and watch them evolve." />
     <title>Evosim</title>
   </head>
   <body>

@@ -2,7 +2,7 @@ import Slider from './Slider.jsx'
 
 function Group({ title, children }) {
   return (
-    <div className="flex flex-col gap-5 rounded-md border border-neutral-800 bg-neutral-900 p-5">
+    <div className="flex flex-col gap-4 rounded-md border border-neutral-800 bg-neutral-900 p-4 sm:gap-5 sm:p-5">
       <p className="text-xs font-bold tracking-[0.14em] text-emerald-400 uppercase">{title}</p>
       {children}
     </div>
@@ -11,14 +11,16 @@ function Group({ title, children }) {
 
 export default function SettingsScreen({ settings, onChange, onReset, onBack, onPlay }) {
   return (
-    <main className="min-h-svh bg-neutral-950 px-6 py-10 text-neutral-100">
-      <div className="mx-auto flex max-w-2xl flex-col gap-8">
-        <div className="flex items-baseline justify-between gap-4 border-b border-neutral-800 pb-4">
-          <h2 className="font-serif text-3xl font-semibold">Settings</h2>
+    <main className="safe-x safe-b min-h-svh bg-neutral-950 px-4 py-6 text-neutral-100 sm:px-6 sm:py-10">
+      <div className="mx-auto flex max-w-2xl flex-col gap-6 sm:gap-8">
+        {/* Sticky so "Back" stays reachable on a phone, where the settings
+            list is several screens long. */}
+        <div className="sticky top-0 z-10 -mx-4 flex items-baseline justify-between gap-4 border-b border-neutral-800 bg-neutral-950/95 px-4 pt-2 pb-3 backdrop-blur-sm sm:-mx-6 sm:px-6 sm:pb-4">
+          <h2 className="font-serif text-2xl font-semibold sm:text-3xl">Settings</h2>
           <button
             type="button"
             onClick={onBack}
-            className="rounded-sm border border-neutral-700 bg-neutral-900 px-4 py-2 text-sm font-semibold transition hover:border-emerald-500 hover:text-emerald-400"
+            className="min-h-11 rounded-sm border border-neutral-700 bg-neutral-900 px-4 py-2 text-sm font-semibold transition hover:border-emerald-500 hover:text-emerald-400"
           >
             ← Back
           </button>
@@ -102,18 +104,21 @@ export default function SettingsScreen({ settings, onChange, onReset, onBack, on
           />
         </Group>
 
-        <div className="flex flex-wrap items-center justify-between gap-4">
+        {/* Reversed on a phone so the primary action is the one nearest the
+            thumb, and both go full width rather than shrinking to a tap-
+            sized gamble. */}
+        <div className="flex flex-col-reverse gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between sm:gap-4">
           <button
             type="button"
             onClick={onReset}
-            className="rounded-sm border border-neutral-700 bg-neutral-900 px-4 py-2 text-sm font-semibold transition hover:border-emerald-500 hover:text-emerald-400"
+            className="min-h-11 rounded-sm border border-neutral-700 bg-neutral-900 px-4 py-2 text-sm font-semibold transition hover:border-emerald-500 hover:text-emerald-400"
           >
             Reset to defaults
           </button>
           <button
             type="button"
             onClick={onPlay}
-            className="rounded-sm bg-amber-500 px-8 py-3 font-semibold text-neutral-950 shadow-lg shadow-amber-900/30 transition hover:bg-amber-400 active:translate-y-px"
+            className="min-h-12 rounded-sm bg-amber-500 px-8 py-3 font-semibold text-neutral-950 shadow-lg shadow-amber-900/30 transition hover:bg-amber-400 active:translate-y-px"
           >
             Play with these settings
           </button>

@@ -7,8 +7,17 @@ import RabbitInsights from './RabbitInsights.jsx'
 import FoxInsights from './FoxInsights.jsx'
 import PopulationPanel from './PopulationPanel.jsx'
 import SpawnPalette from './SpawnPalette.jsx'
-
-const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v))
+import { useIsCompact, useIsTouch, usePanelPlacement } from './useIsCompact.js'
+import {
+  clampOriginAxis,
+  clickSlopPx,
+  pannedView,
+  pinchStart,
+  pinchedView,
+  selectRadiusTiles,
+  tileAt,
+  zoomedView,
+} from './viewport.js'
 
 // Discrete speed multipliers rather than a free slider - a handful of
 // one-click steps is easier to reach for and to "return to normal" from
@@ -125,12 +134,62 @@ function spawnAt(sim, species, tiles) {
   }
 }
 
-// If the viewport (in tile units) is wider/taller than the map, center the
-// map instead of pinning it to an edge. Otherwise clamp so you can't pan
-// past the map's edges.
-function clampOriginAxis(origin, viewLenTiles, mapSize) {
-  if (viewLenTiles >= mapSize) return -(viewLenTiles - mapSize) / 2
-  return clamp(origin, 0, mapSize - viewLenTiles)
+const TOOLBAR_BUTTON = 'rounded-sm border border-neutral-700 bg-neutral-950 px-4 py-2 text-sm font-semibold transition hover:border-emerald-500 hover:text-emerald-400'
+const TOOLBAR_BUTTON_ON = 'rounded-sm border border-emerald-500 bg-emerald-500/20 px-4 py-2 text-sm font-semibold text-emerald-400 transition'
+const ICON_BUTTON = 'flex h-7 w-7 items-center justify-center rounded-sm border border-neutral-700 bg-neutral-950 font-semibold text-neutral-200 transition hover:border-emerald-500 hover:text-emerald-400'
+const ICON_BUTTON_ON = 'flex h-7 w-7 items-center justify-center rounded-sm border border-emerald-500 bg-emerald-500/20 font-semibold text-emerald-400 transition'
+
+// Compact chrome. Every tappable thing is at least 44px on its short edge
+// (the standard finger target); the top row is icon-only and the labelled
+// controls live in a bottom bar, where a thumb can actually reach them.
+const TOUCH_ICON = 'flex h-11 w-11 shrink-0 items-center justify-center rounded-md border border-neutral-800 bg-neutral-950 text-base text-neutral-200 transition active:border-emerald-500 active:text-emerald-400'
+const TAB_BUTTON = 'flex min-w-0 flex-1 flex-col items-center justify-center gap-0.5 rounded-md border px-1 py-1.5 text-[10px] font-semibold transition'
+const TAB_IDLE = 'border-neutral-800 bg-neutral-950 text-neutral-300'
+const TAB_ON = 'border-emerald-500 bg-emerald-500/20 text-emerald-300'
+
+// Slots the panels are dropped into. Each one pins *both* edges along its
+// long axis (rather than one edge plus a percentage max-height): a panel's
+// own `max-h-full` only means anything when its parent's height is definite,
+// and an absolutely positioned box with one edge pinned has an auto height,
+// against which a percentage resolves to nothing and the panel spills past
+// the map. Pinning both edges plus `flex-col` gives each panel "as tall as
+// its content, up to the space available, then scroll".
+const SLOTS = {
+  // Desktop: one panel per corner, each independent of the others.
+  corner: {
+    population: 'pointer-events-none absolute top-3 bottom-3 left-3 flex w-64 flex-col',
+    inspector: 'pointer-events-none absolute top-3 right-3 bottom-3 flex w-80 flex-col',
+    // Stops above the hint line at the bottom of the map rather than over it.
+    spawn: 'pointer-events-none absolute top-3 bottom-10 left-3 flex w-72 flex-col justify-end',
+  },
+  // Phone upright: a bottom sheet. `top-[30%]` both leaves the top third of
+  // the map visible behind an open panel and caps how tall it can grow; the
+  // spawn palette leaves more, since with it open the map is something you
+  // have to be able to aim at.
+  sheet: {
+    population: 'pointer-events-none absolute inset-x-1.5 top-[30%] bottom-1.5 flex flex-col justify-end',
+    inspector: 'pointer-events-none absolute inset-x-1.5 top-[30%] bottom-1.5 flex flex-col justify-end',
+    spawn: 'pointer-events-none absolute inset-x-1.5 top-[38%] bottom-1.5 flex flex-col justify-end',
+  },
+  // Phone sideways: down the right edge, because the map area there is only
+  // a couple of hundred pixels tall but plenty wide. The hint moves out of
+  // the centre to match (see HINT_CLASS) - centred, it would end up behind
+  // the panel.
+  side: {
+    population: 'pointer-events-none absolute top-1.5 right-1.5 bottom-1.5 flex w-[min(20rem,45%)] flex-col',
+    inspector: 'pointer-events-none absolute top-1.5 right-1.5 bottom-1.5 flex w-[min(20rem,45%)] flex-col',
+    spawn: 'pointer-events-none absolute top-1.5 right-1.5 bottom-1.5 flex w-[min(18rem,42%)] flex-col',
+  },
+}
+
+// The one-line "how do I drive this" note over the map. On a compact screen
+// it gets a background, because it sits over the island rather than in the
+// margin below it.
+const HINT_PILL = 'pointer-events-none absolute top-2 max-w-[95%] rounded-full bg-neutral-950/80 px-3 py-1 text-center text-[11px] whitespace-nowrap text-neutral-300'
+const HINT_CLASS = {
+  corner: 'pointer-events-none absolute bottom-3 left-1/2 max-w-[95%] -translate-x-1/2 text-center text-[11px] text-neutral-500',
+  sheet: `${HINT_PILL} left-1/2 -translate-x-1/2`,
+  side: `${HINT_PILL} left-2`,
 }
 
 export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
@@ -139,7 +198,22 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
   const viewRef = useRef({ tilePx: 1, originX: 0, originY: 0, minTilePx: 1, maxTilePx: 1 })
   const sizeRef = useRef({ cssW: 0, cssH: 0 })
   const dragRef = useRef(null)
+  // Every pointer currently down on the canvas, keyed by pointerId - one
+  // entry is a pan drag, two are a pinch. Kept in a ref (not state) because
+  // the handlers below run outside React's render cycle.
+  const pointersRef = useRef(new Map())
+  const pinchRef = useRef(null)
   const [zoomPct, setZoomPct] = useState(100)
+
+  const compact = useIsCompact()
+  const touch = useIsTouch()
+  const placement = usePanelPlacement()
+  const slots = SLOTS[placement]
+  // The panel toggles below are bound once inside the render-loop effect and
+  // in callbacks that shouldn't churn on every layout change, so the compact
+  // flag is mirrored into a ref the same way the sim state is.
+  const compactRef = useRef(compact)
+  compactRef.current = compact
 
   // Simulation speed: multiplies the dt handed to stepSimulation each frame,
   // so "2x" just means "advance the sim twice as far this frame" rather than
@@ -165,12 +239,14 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
   const lastReportedCountsRef = useRef({ rabbits: 0, foxes: 0, kills: 0 })
 
   // "Brains" and "Population" panels: translate the sim's raw state into
-  // plain-language traits/trends (see sim/brainInsight.js). Both are
-  // independent floating overlays (see render below) rather than layout
-  // siblings of the map, and both share one snapshot - built on a throttle
-  // from the sim ref rather than every frame, since it's cheap but there's
-  // no reason to recompute 60x/sec for a text panel - taken whenever either
-  // one is open.
+  // plain-language traits/trends (see sim/brainInsight.js). On a roomy
+  // screen both are independent floating overlays (see render below) rather
+  // than layout siblings of the map, and either can be open on its own. On a
+  // compact screen they become bottom sheets, where there isn't room for two
+  // at once, so opening one closes the others (see closeOthers). Both share
+  // one snapshot - built on a throttle from the sim ref rather than every
+  // frame, since it's cheap but there's no reason to recompute 60x/sec for a
+  // text panel - taken whenever either one is open.
   const showInsightsRef = useRef(false)
   const [showInsights, setShowInsights] = useState(false)
   const showPopulationRef = useRef(false)
@@ -188,14 +264,44 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
     setPaused(false)
   }, [map])
 
+  const setSpawnOpen = useCallback((open) => {
+    spawnRef.current = { ...spawnRef.current, open }
+    setSpawn(spawnRef.current)
+  }, [])
+
+  const setInsightsOpen = useCallback((open) => {
+    showInsightsRef.current = open
+    setShowInsights(open)
+  }, [])
+
+  const setPopulationOpen = useCallback((open) => {
+    showPopulationRef.current = open
+    setShowPopulation(open)
+  }, [])
+
+  /** On a compact screen the panels are full-width bottom sheets that would
+   * stack on top of each other, so only one may be open at a time. On a
+   * roomy screen they're corner overlays and stay independent. */
+  const closeOthers = useCallback(
+    (keep) => {
+      if (!compactRef.current) return
+      if (keep !== 'spawn') setSpawnOpen(false)
+      if (keep !== 'insights') setInsightsOpen(false)
+      if (keep !== 'population') setPopulationOpen(false)
+    },
+    [setSpawnOpen, setInsightsOpen, setPopulationOpen],
+  )
+
   const updateSpawn = useCallback((patch) => {
     spawnRef.current = { ...spawnRef.current, ...patch }
     setSpawn(spawnRef.current)
   }, [])
 
   const toggleSpawnPalette = useCallback(() => {
-    updateSpawn({ open: !spawnRef.current.open })
-  }, [updateSpawn])
+    const open = !spawnRef.current.open
+    if (open) closeOthers('spawn')
+    setSpawnOpen(open)
+  }, [closeOthers, setSpawnOpen])
 
   const scatterSpawn = useCallback(() => {
     const sim = simRef.current
@@ -205,14 +311,16 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
   }, [map])
 
   const toggleInsights = useCallback(() => {
-    showInsightsRef.current = !showInsightsRef.current
-    setShowInsights(showInsightsRef.current)
-  }, [])
+    const open = !showInsightsRef.current
+    if (open) closeOthers('insights')
+    setInsightsOpen(open)
+  }, [closeOthers, setInsightsOpen])
 
   const togglePopulation = useCallback(() => {
-    showPopulationRef.current = !showPopulationRef.current
-    setShowPopulation(showPopulationRef.current)
-  }, [])
+    const open = !showPopulationRef.current
+    if (open) closeOthers('population')
+    setPopulationOpen(open)
+  }, [closeOthers, setPopulationOpen])
 
   // Draws whatever the current view/pan/zoom is, at the given elapsed time
   // (drives the wave animation along the coast). Called continuously from
@@ -237,6 +345,14 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
     setSpeed(mult)
   }, [])
 
+  // The compact bar has no room for four speed buttons, so one button cycles
+  // through them and wears the current multiplier as its label.
+  const cycleSpeed = useCallback(() => {
+    const next = SPEED_OPTIONS[(SPEED_OPTIONS.indexOf(speedRef.current) + 1) % SPEED_OPTIONS.length]
+    speedRef.current = next
+    setSpeed(next)
+  }, [])
+
   const togglePaused = useCallback(() => {
     pausedRef.current = !pausedRef.current
     setPaused(pausedRef.current)
@@ -251,16 +367,7 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
   const applyZoom = useCallback(
     (newTilePx, anchorCssX, anchorCssY) => {
       if (!map) return
-      const v = viewRef.current
-      const { cssW, cssH } = sizeRef.current
-      newTilePx = clamp(newTilePx, v.minTilePx, v.maxTilePx)
-      const tx = v.originX + anchorCssX / v.tilePx
-      const ty = v.originY + anchorCssY / v.tilePx
-      let originX = tx - anchorCssX / newTilePx
-      let originY = ty - anchorCssY / newTilePx
-      originX = clampOriginAxis(originX, cssW / newTilePx, map.size)
-      originY = clampOriginAxis(originY, cssH / newTilePx, map.size)
-      viewRef.current = { ...v, tilePx: newTilePx, originX, originY }
+      viewRef.current = zoomedView(viewRef.current, sizeRef.current, map.size, newTilePx, anchorCssX, anchorCssY)
       reportZoom()
     },
     [map, reportZoom],
@@ -269,13 +376,20 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
   useEffect(() => {
     const canvas = canvasRef.current
     const wrap = wrapRef.current
-    if (!canvas || !wrap || !map) return
+    if (!canvas || !map) return
 
     function measureAndResize(resetView) {
       const dpr = Math.min(2, window.devicePixelRatio || 1)
       const wrapRect = wrap.getBoundingClientRect()
-      const cssW = Math.max(200, Math.floor(wrapRect.width - 40))
-      const cssH = Math.max(200, Math.floor(wrapRect.height - 40))
+      // Read the padding rather than hardcoding it: the wrapper's padding is
+      // tighter on a phone than on a desktop, and a stale constant here
+      // would leave the canvas's backing store out of sync with its CSS box.
+      const style = window.getComputedStyle(wrap)
+      const padX = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight)
+      const padY = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom)
+      const cssW = Math.max(160, Math.floor(wrapRect.width - padX))
+      const cssH = Math.max(160, Math.floor(wrapRect.height - padY))
+      const prevSize = sizeRef.current
       sizeRef.current = { cssW, cssH }
       canvas.style.width = `${cssW}px`
       canvas.style.height = `${cssH}px`
@@ -296,12 +410,16 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
           maxTilePx,
         }
       } else {
+        // Keep the map point at the center of the canvas centered across the
+        // resize, so rotating a phone (or opening the on-screen keyboard)
+        // doesn't fling the view off to a corner.
         const v = viewRef.current
-        const tilePx = clamp(v.tilePx, minTilePx, maxTilePx)
+        const [centerTileX, centerTileY] = tileAt(v, prevSize.cssW / 2, prevSize.cssH / 2)
+        const tilePx = Math.min(maxTilePx, Math.max(minTilePx, v.tilePx))
         viewRef.current = {
           tilePx,
-          originX: clampOriginAxis(v.originX, cssW / tilePx, map.size),
-          originY: clampOriginAxis(v.originY, cssH / tilePx, map.size),
+          originX: clampOriginAxis(centerTileX - cssW / 2 / tilePx, cssW / tilePx, map.size),
+          originY: clampOriginAxis(centerTileY - cssH / 2 / tilePx, cssH / tilePx, map.size),
           minTilePx,
           maxTilePx,
         }
@@ -322,12 +440,17 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
       const dt = now - lastTime
       lastTime = now
       const sim = simRef.current
-      if (sim && !pausedRef.current) {
-        // Cap the per-frame sim step so a stalled tab/slow frame (dt spikes
-        // after e.g. an alt-tab) can't suddenly dump minutes of simulated
-        // time into one step - clamp first, then apply the speed multiplier
-        // on top of the clamped value.
-        stepSimulation(sim, Math.min(dt, 250) * speedRef.current)
+      if (sim) {
+        if (!pausedRef.current) {
+          // Cap the per-frame sim step so a stalled tab/slow frame (dt spikes
+          // after e.g. an alt-tab) can't suddenly dump minutes of simulated
+          // time into one step - clamp first, then apply the speed multiplier
+          // on top of the clamped value.
+          stepSimulation(sim, Math.min(dt, 250) * speedRef.current)
+        }
+        // Outside the pause check: pausing to set a scenario up is exactly
+        // when you spawn creatures and tap one to read it, and neither the
+        // counters nor the panels should sit stale until you press play.
         const last = lastReportedCountsRef.current
         if (sim.rabbits.length !== last.rabbits || sim.foxes.length !== last.foxes || sim.kills !== last.kills) {
           lastReportedCountsRef.current = { rabbits: sim.rabbits.length, foxes: sim.foxes.length, kills: sim.kills }
@@ -349,53 +472,77 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
       resizeTimer = setTimeout(() => measureAndResize(false), 80)
     }
 
-    function onWheel(e) {
-      e.preventDefault()
+    function canvasPoint(e) {
       const rect = canvas.getBoundingClientRect()
-      const mx = e.clientX - rect.left
-      const my = e.clientY - rect.top
-      const factor = Math.exp(-e.deltaY * 0.0015)
-      applyZoom(viewRef.current.tilePx * factor, mx, my)
+      return { x: e.clientX - rect.left, y: e.clientY - rect.top, clientX: e.clientX, clientY: e.clientY }
     }
 
-    // A click (place a rabbit / select one) is a pointer down+up with
-    // negligible movement in between; anything past CLICK_SLOP_PX counts as
-    // a pan drag instead, same gesture either way until release decides.
-    const CLICK_SLOP_PX = 4
+    function onWheel(e) {
+      e.preventDefault()
+      const p = canvasPoint(e)
+      const factor = Math.exp(-e.deltaY * 0.0015)
+      applyZoom(viewRef.current.tilePx * factor, p.x, p.y)
+    }
 
-    function onPointerDown(e) {
-      canvas.setPointerCapture(e.pointerId)
+    function beginDrag(pointerId, point) {
       dragRef.current = {
-        pointerId: e.pointerId,
-        startX: e.clientX,
-        startY: e.clientY,
+        pointerId,
+        startX: point.clientX,
+        startY: point.clientY,
         originX: viewRef.current.originX,
         originY: viewRef.current.originY,
         moved: false,
       }
+    }
+
+    // One finger pans (and, if it barely moves, taps to select/place); a
+    // second finger turns the gesture into a pinch, which zooms and pans
+    // together until a finger lifts. Issue #7: there was no way to zoom at
+    // all on a touch device before this - the canvas only listened to wheel
+    // events.
+    function onPointerDown(e) {
+      canvas.setPointerCapture(e.pointerId)
+      const point = canvasPoint(e)
+      pointersRef.current.set(e.pointerId, point)
+
+      const points = [...pointersRef.current.values()]
+      if (points.length >= 2) {
+        // Promoting to a pinch cancels the drag: whatever the first finger
+        // was doing, this gesture is no longer a tap.
+        dragRef.current = null
+        pinchRef.current = pinchStart(viewRef.current, points[0], points[1])
+      } else {
+        beginDrag(e.pointerId, point)
+      }
       canvas.style.cursor = 'grabbing'
     }
+
     function onPointerMove(e) {
+      const tracked = pointersRef.current.get(e.pointerId)
+      if (tracked) pointersRef.current.set(e.pointerId, canvasPoint(e))
+
+      const points = [...pointersRef.current.values()]
+      if (pinchRef.current && points.length >= 2) {
+        viewRef.current = pinchedView(viewRef.current, sizeRef.current, map.size, pinchRef.current, points[0], points[1])
+        reportZoom()
+        return
+      }
+
       const d = dragRef.current
       if (!d || d.pointerId !== e.pointerId) return
-      const v = viewRef.current
-      const { cssW, cssH } = sizeRef.current
       const dxCss = e.clientX - d.startX
       const dyCss = e.clientY - d.startY
-      if (Math.abs(dxCss) > CLICK_SLOP_PX || Math.abs(dyCss) > CLICK_SLOP_PX) d.moved = true
-      const originX = clampOriginAxis(d.originX - dxCss / v.tilePx, cssW / v.tilePx, map.size)
-      const originY = clampOriginAxis(d.originY - dyCss / v.tilePx, cssH / v.tilePx, map.size)
-      viewRef.current = { ...v, originX, originY }
+      const slop = clickSlopPx(e.pointerType)
+      if (Math.abs(dxCss) > slop || Math.abs(dyCss) > slop) d.moved = true
+      viewRef.current = pannedView(viewRef.current, sizeRef.current, map.size, d.originX, d.originY, dxCss, dyCss)
     }
+
     function onCanvasClick(e) {
       const sim = simRef.current
       if (!sim) return
-      const rect = canvas.getBoundingClientRect()
-      const mx = e.clientX - rect.left
-      const my = e.clientY - rect.top
+      const p = canvasPoint(e)
       const v = viewRef.current
-      const tileX = v.originX + mx / v.tilePx
-      const tileY = v.originY + my / v.tilePx
+      const [tileX, tileY] = tileAt(v, p.x, p.y)
 
       // With the spawn palette open the map is a placement surface; closed,
       // clicks select a creature to inspect.
@@ -409,7 +556,9 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
 
       let best = null
       let bestKind = null
-      let bestDist = 0.7 // tiles - must click reasonably close to something to select it
+      // Must tap reasonably close to something to select it - a fingertip
+      // gets a wider radius than a mouse pointer (see selectRadiusTiles).
+      let bestDist = selectRadiusTiles(e.pointerType, v.tilePx)
       for (const [kind, list] of [['rabbit', sim.rabbits], ['fox', sim.foxes]]) {
         for (const c of list) {
           if (!c.alive) continue
@@ -422,38 +571,77 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
         }
       }
       selectCreature(sim, bestKind, best ? best.id : null)
+      // On touch there's no hover, so a tap that lands on a creature should
+      // also *show* you what it selected rather than silently highlighting
+      // something behind a closed panel.
+      if (best && compactRef.current && !showInsightsRef.current) {
+        closeOthers('insights')
+        setInsightsOpen(true)
+        setInsightsData(buildInsightsData(sim))
+      }
     }
+
     function onPointerUp(e) {
-      const d = dragRef.current
-      if (!d || d.pointerId !== e.pointerId) return
-      dragRef.current = null
-      canvas.style.cursor = 'grab'
+      pointersRef.current.delete(e.pointerId)
       try {
         canvas.releasePointerCapture(e.pointerId)
       } catch {
         // pointer capture already released - safe to ignore
       }
+
+      if (pinchRef.current) {
+        pinchRef.current = null
+        const rest = [...pointersRef.current.entries()]
+        if (rest.length === 1) {
+          // One finger left after a pinch: carry on panning from where it
+          // currently is, but pre-marked as moved so lifting it doesn't
+          // register as a tap on whatever it happens to be resting over.
+          const [id, point] = rest[0]
+          beginDrag(id, point)
+          dragRef.current.moved = true
+        } else if (rest.length >= 2) {
+          pinchRef.current = pinchStart(viewRef.current, rest[0][1], rest[1][1])
+        }
+        canvas.style.cursor = pointersRef.current.size ? 'grabbing' : 'grab'
+        return
+      }
+
+      const d = dragRef.current
+      if (!d || d.pointerId !== e.pointerId) return
+      dragRef.current = null
+      canvas.style.cursor = 'grab'
       if (!d.moved) onCanvasClick(e)
     }
+
+    // iOS Safari still runs its own page-level pinch zoom on two fingers even
+    // where `touch-action: none` stops the standard path, which would zoom
+    // the whole UI instead of the map. These non-standard events are the
+    // only way to opt out of it.
+    const preventGesture = (e) => e.preventDefault()
 
     canvas.addEventListener('wheel', onWheel, { passive: false })
     canvas.addEventListener('pointerdown', onPointerDown)
     canvas.addEventListener('pointermove', onPointerMove)
     canvas.addEventListener('pointerup', onPointerUp)
     canvas.addEventListener('pointercancel', onPointerUp)
+    canvas.addEventListener('gesturestart', preventGesture)
+    canvas.addEventListener('gesturechange', preventGesture)
+    canvas.addEventListener('gestureend', preventGesture)
     // A ResizeObserver on the wrapper (rather than a window 'resize'
     // listener) also catches the wrap shrinking/growing from layout
     // changes that aren't a window resize (e.g. the toolbar wrapping to a
-    // second line on a narrow viewport), which a window-only listener
-    // would miss, leaving the canvas's internal size out of sync with its
-    // new CSS size. The brains/population panels are floating overlays
-    // (absolutely positioned over the canvas, not layout siblings of it)
-    // specifically so opening/closing them never triggers this at all -
-    // the map stays put and doesn't jump or re-clamp its pan/zoom.
+    // second line on a narrow viewport, or switching to the compact
+    // layout), which a window-only listener would miss, leaving the
+    // canvas's internal size out of sync with its new CSS size. The
+    // brains/population panels are floating overlays (absolutely positioned
+    // over the canvas, not layout siblings of it) specifically so
+    // opening/closing them never triggers this at all - the map stays put
+    // and doesn't jump or re-clamp its pan/zoom.
     const ro = new ResizeObserver(onResize)
     ro.observe(wrap)
     canvas.style.cursor = 'grab'
 
+    const pointers = pointersRef.current
     return () => {
       ro.disconnect()
       canvas.removeEventListener('wheel', onWheel)
@@ -461,10 +649,16 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
       canvas.removeEventListener('pointermove', onPointerMove)
       canvas.removeEventListener('pointerup', onPointerUp)
       canvas.removeEventListener('pointercancel', onPointerUp)
+      canvas.removeEventListener('gesturestart', preventGesture)
+      canvas.removeEventListener('gesturechange', preventGesture)
+      canvas.removeEventListener('gestureend', preventGesture)
       clearTimeout(resizeTimer)
       cancelAnimationFrame(raf)
+      pointers.clear()
+      pinchRef.current = null
+      dragRef.current = null
     }
-  }, [map, applyZoom, draw, reportZoom])
+  }, [map, applyZoom, draw, reportZoom, closeOthers, setInsightsOpen])
 
   const zoomStep = (mult) => {
     const { cssW, cssH } = sizeRef.current
@@ -484,160 +678,157 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
     reportZoom()
   }
 
+  const hint = spawn.open
+    ? `${touch ? 'Tap' : 'Click'} a tile to place ${spawn.count} ${spawn.species}${spawn.count === 1 ? '' : spawn.species === 'fox' ? 'es' : 's'}`
+    : touch
+      ? 'Pinch to zoom · Tap a creature'
+      : 'Scroll to zoom · Drag to pan · Click a creature to inspect it'
+
+  // On a compact screen the hint sits over the map itself, so it retires
+  // after a few seconds rather than permanently covering a strip of island.
+  // It comes back whenever it has something new to say (a new map, or spawn
+  // mode turning the map into a placement surface).
+  const [hintVisible, setHintVisible] = useState(true)
+  useEffect(() => {
+    setHintVisible(true)
+    if (!compact) return
+    const timer = setTimeout(() => setHintVisible(false), 6000)
+    return () => clearTimeout(timer)
+  }, [compact, map, spawn.open])
+
+  const stats = map ? (
+    <>
+      <span>
+        🐇 <b className="font-mono text-neutral-100 tabular-nums">{counts.rabbits}</b>
+      </span>
+      <span>
+        🦊 <b className="font-mono text-neutral-100 tabular-nums">{counts.foxes}</b>
+      </span>
+      <span>
+        {compact ? '🍽' : 'Caught'} <b className="font-mono text-red-400 tabular-nums">{counts.kills}</b>
+      </span>
+    </>
+  ) : null
+
+  // Two chrome layouts over one shared map area. The compact one splits its
+  // controls between a slim icon row at the top and a thumb-height tab bar at
+  // the bottom, because a phone can't fit the desktop toolbar without the
+  // island disappearing underneath it (issue #7).
   return (
-    <main className="flex min-h-svh flex-col bg-neutral-950 text-neutral-100">
-      <div className="flex flex-wrap items-center justify-between gap-4 border-b border-neutral-800 bg-neutral-900 px-4 py-3">
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={onBack}
-            className="rounded-sm border border-neutral-700 bg-neutral-950 px-4 py-2 text-sm font-semibold transition hover:border-emerald-500 hover:text-emerald-400"
-          >
-            ← Menu
+    <main className="flex min-h-svh flex-col overscroll-none bg-neutral-950 text-neutral-100">
+      {compact ? (
+        <div className="safe-x flex items-center gap-2 border-b border-neutral-800 bg-neutral-900 px-2 py-2">
+          <button type="button" onClick={onBack} aria-label="Menu" className={TOUCH_ICON}>
+            ←
           </button>
-          <button
-            type="button"
-            onClick={onNewMap}
-            className="rounded-sm border border-neutral-700 bg-neutral-950 px-4 py-2 text-sm font-semibold transition hover:border-emerald-500 hover:text-emerald-400"
-          >
-            ⟳ New map
+          <button type="button" onClick={onNewMap} aria-label="New map" className={TOUCH_ICON}>
+            ⟳
           </button>
-          <button
-            type="button"
-            onClick={onOpenSettings}
-            className="rounded-sm border border-neutral-700 bg-neutral-950 px-4 py-2 text-sm font-semibold transition hover:border-emerald-500 hover:text-emerald-400"
-          >
-            ⚙ Settings
+          <button type="button" onClick={onOpenSettings} aria-label="Settings" className={TOUCH_ICON}>
+            ⚙
           </button>
-          {map ? (
-            <button
-              type="button"
-              onClick={toggleSpawnPalette}
-              className={
-                spawn.open
-                  ? 'rounded-sm border border-emerald-500 bg-emerald-500/20 px-4 py-2 text-sm font-semibold text-emerald-400 transition'
-                  : 'rounded-sm border border-neutral-700 bg-neutral-950 px-4 py-2 text-sm font-semibold transition hover:border-emerald-500 hover:text-emerald-400'
-              }
-            >
-              🐾 {spawn.open ? 'Click a tile to place…' : 'Spawn creatures'}
+          <div className="ml-auto flex items-center gap-3 overflow-x-auto text-xs whitespace-nowrap text-neutral-400">
+            {stats}
+          </div>
+        </div>
+      ) : (
+        <div className="flex flex-wrap items-center justify-between gap-4 border-b border-neutral-800 bg-neutral-900 px-4 py-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <button type="button" onClick={onBack} className={TOOLBAR_BUTTON}>
+              ← Menu
             </button>
-          ) : null}
-          {map ? (
-            <button
-              type="button"
-              onClick={toggleInsights}
-              className={
-                showInsights
-                  ? 'rounded-sm border border-emerald-500 bg-emerald-500/20 px-4 py-2 text-sm font-semibold text-emerald-400 transition'
-                  : 'rounded-sm border border-neutral-700 bg-neutral-950 px-4 py-2 text-sm font-semibold transition hover:border-emerald-500 hover:text-emerald-400'
-              }
-            >
-              🔍 Inspect
+            <button type="button" onClick={onNewMap} className={TOOLBAR_BUTTON}>
+              ⟳ New map
             </button>
-          ) : null}
-          {map ? (
-            <button
-              type="button"
-              onClick={togglePopulation}
-              className={
-                showPopulation
-                  ? 'rounded-sm border border-emerald-500 bg-emerald-500/20 px-3 py-1.5 text-xs font-semibold text-emerald-400 transition'
-                  : 'rounded-sm border border-neutral-700 bg-neutral-950 px-3 py-1.5 text-xs font-semibold transition hover:border-emerald-500 hover:text-emerald-400'
-              }
-            >
-              📈 Population
+            <button type="button" onClick={onOpenSettings} className={TOOLBAR_BUTTON}>
+              ⚙ Settings
             </button>
+            {map ? (
+              <button type="button" onClick={toggleSpawnPalette} className={spawn.open ? TOOLBAR_BUTTON_ON : TOOLBAR_BUTTON}>
+                🐾 {spawn.open ? 'Click a tile to place…' : 'Spawn creatures'}
+              </button>
+            ) : null}
+            {map ? (
+              <button type="button" onClick={toggleInsights} className={showInsights ? TOOLBAR_BUTTON_ON : TOOLBAR_BUTTON}>
+                🔍 Inspect
+              </button>
+            ) : null}
+            {map ? (
+              <button type="button" onClick={togglePopulation} className={showPopulation ? TOOLBAR_BUTTON_ON : TOOLBAR_BUTTON}>
+                📈 Population
+              </button>
+            ) : null}
+          </div>
+          {map ? (
+            <div className="flex flex-wrap items-center gap-4 text-xs text-neutral-400">
+              {stats}
+              <span>
+                Size <b className="font-mono text-neutral-100 tabular-nums">{map.size}×{map.size}</b>
+              </span>
+              <span>
+                Lakes <b className="font-mono text-neutral-100 tabular-nums">{map.lakeCount}</b>
+              </span>
+              <span>
+                Seed <b className="font-mono text-neutral-100 tabular-nums">{map.seed}</b>
+              </span>
+              <div className="flex items-center gap-1 border-l border-neutral-800 pl-4">
+                <button
+                  type="button"
+                  onClick={togglePaused}
+                  aria-label={paused ? 'Resume' : 'Pause'}
+                  className={paused ? ICON_BUTTON_ON : ICON_BUTTON}
+                >
+                  {paused ? '▶' : '⏸'}
+                </button>
+                {SPEED_OPTIONS.map((mult) => (
+                  <button
+                    key={mult}
+                    type="button"
+                    onClick={() => changeSpeed(mult)}
+                    aria-label={`${mult}x speed`}
+                    className={
+                      speed === mult
+                        ? 'h-7 min-w-7 rounded-sm border border-emerald-500 bg-emerald-500/20 px-1.5 font-mono text-xs font-semibold text-emerald-400 transition'
+                        : 'h-7 min-w-7 rounded-sm border border-neutral-700 bg-neutral-950 px-1.5 font-mono text-xs font-semibold text-neutral-200 transition hover:border-emerald-500 hover:text-emerald-400'
+                    }
+                  >
+                    {mult}×
+                  </button>
+                ))}
+              </div>
+              <div className="flex items-center gap-1 border-l border-neutral-800 pl-4">
+                <button type="button" onClick={() => zoomStep(1 / 1.4)} aria-label="Zoom out" className={ICON_BUTTON}>
+                  −
+                </button>
+                <span className="w-12 text-center font-mono text-neutral-100 tabular-nums">{zoomPct}%</span>
+                <button type="button" onClick={() => zoomStep(1.4)} aria-label="Zoom in" className={ICON_BUTTON}>
+                  +
+                </button>
+                <button
+                  type="button"
+                  onClick={zoomReset}
+                  className="ml-1 rounded-sm border border-neutral-700 bg-neutral-950 px-3 py-1 text-xs font-semibold transition hover:border-emerald-500 hover:text-emerald-400"
+                >
+                  Fit
+                </button>
+              </div>
+            </div>
           ) : null}
         </div>
-        {map ? (
-          <div className="flex flex-wrap items-center gap-4 text-xs text-neutral-400">
-            <span>
-              🐇 <b className="font-mono text-neutral-100 tabular-nums">{counts.rabbits}</b>
-            </span>
-            <span>
-              🦊 <b className="font-mono text-neutral-100 tabular-nums">{counts.foxes}</b>
-            </span>
-            <span>
-              Caught <b className="font-mono text-red-400 tabular-nums">{counts.kills}</b>
-            </span>
-            <span>
-              Size <b className="font-mono text-neutral-100 tabular-nums">{map.size}×{map.size}</b>
-            </span>
-            <span>
-              Lakes <b className="font-mono text-neutral-100 tabular-nums">{map.lakeCount}</b>
-            </span>
-            <span>
-              Seed <b className="font-mono text-neutral-100 tabular-nums">{map.seed}</b>
-            </span>
-            <div className="flex items-center gap-1 border-l border-neutral-800 pl-4">
-              <button
-                type="button"
-                onClick={togglePaused}
-                aria-label={paused ? 'Resume' : 'Pause'}
-                className={
-                  paused
-                    ? 'flex h-7 w-7 items-center justify-center rounded-sm border border-emerald-500 bg-emerald-500/20 font-semibold text-emerald-400 transition'
-                    : 'flex h-7 w-7 items-center justify-center rounded-sm border border-neutral-700 bg-neutral-950 font-semibold text-neutral-200 transition hover:border-emerald-500 hover:text-emerald-400'
-                }
-              >
-                {paused ? '▶' : '⏸'}
-              </button>
-              {SPEED_OPTIONS.map((mult) => (
-                <button
-                  key={mult}
-                  type="button"
-                  onClick={() => changeSpeed(mult)}
-                  aria-label={`${mult}x speed`}
-                  className={
-                    speed === mult
-                      ? 'h-7 min-w-7 rounded-sm border border-emerald-500 bg-emerald-500/20 px-1.5 font-mono text-xs font-semibold text-emerald-400 transition'
-                      : 'h-7 min-w-7 rounded-sm border border-neutral-700 bg-neutral-950 px-1.5 font-mono text-xs font-semibold text-neutral-200 transition hover:border-emerald-500 hover:text-emerald-400'
-                  }
-                >
-                  {mult}×
-                </button>
-              ))}
-            </div>
-            <div className="flex items-center gap-1 border-l border-neutral-800 pl-4">
-              <button
-                type="button"
-                onClick={() => zoomStep(1 / 1.4)}
-                aria-label="Zoom out"
-                className="flex h-7 w-7 items-center justify-center rounded-sm border border-neutral-700 bg-neutral-950 font-semibold text-neutral-200 transition hover:border-emerald-500 hover:text-emerald-400"
-              >
-                −
-              </button>
-              <span className="w-12 text-center font-mono text-neutral-100 tabular-nums">{zoomPct}%</span>
-              <button
-                type="button"
-                onClick={() => zoomStep(1.4)}
-                aria-label="Zoom in"
-                className="flex h-7 w-7 items-center justify-center rounded-sm border border-neutral-700 bg-neutral-950 font-semibold text-neutral-200 transition hover:border-emerald-500 hover:text-emerald-400"
-              >
-                +
-              </button>
-              <button
-                type="button"
-                onClick={zoomReset}
-                className="ml-1 rounded-sm border border-neutral-700 bg-neutral-950 px-3 py-1 text-xs font-semibold transition hover:border-emerald-500 hover:text-emerald-400"
-              >
-                Fit
-              </button>
-            </div>
-          </div>
-        ) : null}
-      </div>
-      <div ref={wrapRef} className="relative flex min-h-0 flex-1 items-center justify-center p-5">
+      )}
+
+      <div
+        ref={wrapRef}
+        className={`relative flex min-h-0 flex-1 items-center justify-center ${compact ? 'p-1.5' : 'p-5'}`}
+      >
         <canvas ref={canvasRef} className="touch-none rounded-sm bg-[#16324a] shadow-2xl shadow-black/40" />
-        <p className="pointer-events-none absolute bottom-3 left-1/2 -translate-x-1/2 text-[11px] text-neutral-500">
-          {spawn.open
-            ? `Click a tile to place ${spawn.count} ${spawn.species}${spawn.count === 1 ? '' : spawn.species === 'fox' ? 'es' : 's'}`
-            : 'Scroll to zoom · Drag to pan · Click a creature to inspect it'}
-        </p>
+        {hintVisible ? <p className={HINT_CLASS[placement]}>{hint}</p> : null}
         {/* Overlaid on top of the map (not laid out beside it) so opening
-            either panel never resizes or shifts the canvas underneath. */}
+            any panel never resizes or shifts the canvas underneath. On a
+            compact screen they span the width as a bottom sheet instead of
+            sitting in a corner, and only one is ever open at a time. */}
         {showPopulation ? (
-          <div className="pointer-events-none absolute top-3 left-3 max-h-[calc(100%-1.5rem)]">
+          <div className={slots.population}>
             <PopulationPanel
               population={insightsData?.population ?? counts.rabbits}
               foxPopulation={insightsData?.foxPopulation ?? counts.foxes}
@@ -645,6 +836,7 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
               history={insightsData?.history ?? []}
               generationRange={insightsData?.generationRange ?? null}
               foxGenerationRange={insightsData?.foxGenerationRange ?? null}
+              mapInfo={compact && map ? { size: map.size, lakeCount: map.lakeCount, seed: map.seed } : null}
               onClose={togglePopulation}
             />
           </div>
@@ -653,7 +845,7 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
             a fox's genome and a rabbit's neural net need genuinely
             different panels (see FoxInsights.jsx). */}
         {showInsights ? (
-          <div className="pointer-events-none absolute top-3 right-3 max-h-[calc(100%-1.5rem)]">
+          <div className={slots.inspector}>
             {insightsData?.selected?.kind === 'fox' ? (
               <FoxInsights selected={insightsData.selected} onClose={toggleInsights} />
             ) : (
@@ -661,8 +853,10 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
             )}
           </div>
         ) : null}
+        {/* Capped shorter than the read-only sheets: with the palette open
+            the map is a placement surface, so it has to stay tappable. */}
         {spawn.open ? (
-          <div className="pointer-events-none absolute bottom-10 left-3 max-h-[calc(100%-1.5rem)]">
+          <div className={slots.spawn}>
             <SpawnPalette
               species={spawn.species}
               count={spawn.count}
@@ -674,6 +868,55 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
           </div>
         ) : null}
       </div>
+
+      {compact && map ? (
+        <div className="safe-x safe-b flex items-stretch gap-1.5 border-t border-neutral-800 bg-neutral-900 px-1.5 pt-1.5">
+          <button
+            type="button"
+            onClick={toggleSpawnPalette}
+            aria-pressed={spawn.open}
+            className={`${TAB_BUTTON} ${spawn.open ? TAB_ON : TAB_IDLE}`}
+          >
+            <span className="text-lg leading-none">🐾</span>
+            Spawn
+          </button>
+          <button
+            type="button"
+            onClick={toggleInsights}
+            aria-pressed={showInsights}
+            className={`${TAB_BUTTON} ${showInsights ? TAB_ON : TAB_IDLE}`}
+          >
+            <span className="text-lg leading-none">🔍</span>
+            Inspect
+          </button>
+          <button
+            type="button"
+            onClick={togglePopulation}
+            aria-pressed={showPopulation}
+            className={`${TAB_BUTTON} ${showPopulation ? TAB_ON : TAB_IDLE}`}
+          >
+            <span className="text-lg leading-none">📈</span>
+            Trends
+          </button>
+          <button
+            type="button"
+            onClick={togglePaused}
+            aria-label={paused ? 'Resume' : 'Pause'}
+            className={`${TAB_BUTTON} ${paused ? TAB_ON : TAB_IDLE}`}
+          >
+            <span className="text-lg leading-none">{paused ? '▶' : '⏸'}</span>
+            {paused ? 'Play' : 'Pause'}
+          </button>
+          <button type="button" onClick={cycleSpeed} aria-label={`Speed ${speed}x, tap to change`} className={`${TAB_BUTTON} ${TAB_IDLE}`}>
+            <span className="font-mono text-lg leading-none">{speed}×</span>
+            Speed
+          </button>
+          <button type="button" onClick={zoomReset} aria-label="Fit map to screen" className={`${TAB_BUTTON} ${TAB_IDLE}`}>
+            <span className="font-mono text-lg leading-none">⤢</span>
+            {zoomPct}%
+          </button>
+        </div>
+      ) : null}
     </main>
   )
 }

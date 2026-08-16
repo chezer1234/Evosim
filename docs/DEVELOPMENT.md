@@ -11,6 +11,9 @@ src/
   worldgen/       Procedural map generation and the Home → Settings → Game screens
     mapgen.js       Seeded Perlin fBm island generation, lake carving, and canvas rendering
                      (framework-agnostic — no React here)
+    viewport.js     The map view's pan/zoom/pinch maths (framework-agnostic too)
+    useIsCompact.js Media queries behind the responsive layout: compact chrome,
+                     touch wording, and where the floating panels dock
     *.jsx            Screens and UI that drive mapgen.js
   sim/            The evolution simulation, layered on top of a generated map
     brain.js         Tiny hand-rolled feedforward neural net (each rabbit's "genome")
@@ -45,7 +48,18 @@ npm test          # run once (used by CI)
 npm run test:watch
 ```
 
-Tests live alongside the source they cover (`*.test.js`) and run on [Vitest](https://vitest.dev). They focus on the pure simulation logic — map-generation invariants, the brain's forward pass and mutation, the fox genome (mutation bounds and every gene's mapping to sim units), the rabbit lifecycle (movement bounds, eating, energy depletion/death, reproduction), and predation (hunting, pouncing, fleeing, camouflage, pack behaviour) — since that's the code with real behavior to get wrong. Rendering and React components aren't covered yet.
+Tests live alongside the source they cover (`*.test.js`) and run on [Vitest](https://vitest.dev). They focus on the pure logic — map-generation invariants, the brain's forward pass and mutation, the fox genome (mutation bounds and every gene's mapping to sim units), the rabbit lifecycle (movement bounds, eating, energy depletion/death, reproduction), predation (hunting, pouncing, fleeing, camouflage, pack behaviour), and the map view's pan/zoom/pinch maths (`worldgen/viewport.js`) — since that's the code with real behavior to get wrong. Rendering and React components aren't covered yet.
+
+## Responsive layout
+
+The app has to work on a phone as well as a desktop (see
+[`docs/plans/issue-7-mobile-support.md`](plans/issue-7-mobile-support.md)).
+Nothing branches on user-agent: `worldgen/useIsCompact.js` exposes media
+queries for how much *room* there is, and the layout follows from that —
+compact toolbars below 640px wide (or 560px tall), and floating panels that
+dock as corner overlays, a bottom sheet, or a side panel depending on the
+shape of the viewport. Test layout changes by resizing the browser window;
+rotating a phone is the same thing.
 
 ## Linting
 
