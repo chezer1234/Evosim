@@ -23,6 +23,8 @@ function GeneBar({ label, value, color }) {
 
 function statusLine(fox) {
   if (!fox.alive) return 'Deceased'
+  if (fox.floundering) return '🌊 out of its depth'
+  if (fox.swimming) return '🌊 swimming'
   if (fox.feeding) return 'feeding'
   if (fox.hunting) return fox.sprinting ? 'chasing' : 'hunting'
   return 'prowling'

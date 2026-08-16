@@ -42,15 +42,19 @@ export default function RabbitInsights({ selected, onClose }) {
             {selected.gestating ? ' · expecting' : ''}
             {selected.sheltered
               ? ' · 🕳 underground'
-              : selected.fleeing
-                ? ' · 🦊 fleeing'
-                : selected.searching
-                  ? ' · searching'
-                  : selected.running
-                    ? ' · running'
-                    : selected.resting
-                      ? ' · resting'
-                      : ''}
+              : selected.floundering
+                ? ' · 🌊 out of its depth'
+                : selected.swimming
+                  ? ' · 🌊 swimming'
+                  : selected.fleeing
+                    ? ' · 🦊 fleeing'
+                    : selected.searching
+                      ? ' · searching'
+                      : selected.running
+                        ? ' · running'
+                        : selected.resting
+                          ? ' · resting'
+                          : ''}
             {selected.heardOnly ? ' · 👂 heard a fox it cannot see' : ''}
             {selected.calling ? ' · 📣 calling' : selected.alarmHeard > 0 ? ` · 👂 hears an alarm (${Math.round(selected.alarmHeard * 100)}%)` : ''}
           </p>

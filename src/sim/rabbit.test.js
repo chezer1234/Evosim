@@ -81,7 +81,7 @@ describe('alarmReach', () => {
 describe('describeRabbitSenses', () => {
   it('summarizes both senses without leaking NaN into the panel', () => {
     const notes = describeRabbitSenses(genes())
-    expect(notes).toHaveLength(2)
+    expect(notes).toHaveLength(3)
     for (const note of notes) expect(note).not.toContain('NaN')
   })
 })

@@ -11,6 +11,8 @@
 // gaussian mutations, exactly like rabbit brain weights - same evolutionary
 // loop, different representation.
 
+import { canSwim, describeSwimming, swimDrainFactor, swimSpeedFactor } from './water.js'
+
 /** Display metadata for the genes, in inspector order. `high`/`low` are the
  * plain-English readings the UI and describeFox() use, so the wording lives
  * next to the gene rather than being duplicated per call site. */
@@ -23,6 +25,7 @@ export const FOX_GENE_META = [
   { key: 'packTendency', label: 'Pack tendency', color: 'rgb(167,139,250)', high: 'hunts with the pack', low: 'a loner' },
   { key: 'stamina', label: 'Stamina', color: 'rgb(56,189,248)', high: 'chases relentlessly', low: 'winded after a short dash' },
   { key: 'fecundity', label: 'Fecundity', color: 'rgb(244,114,182)', high: 'breeds readily', low: 'breeds rarely' },
+  { key: 'swimming', label: 'Swimming', color: 'rgb(56,189,248)', high: 'follows prey straight into the lake', low: 'will not get its feet wet - water stops it dead' },
 ]
 
 export const FOX_GENE_KEYS = FOX_GENE_META.map((m) => m.key)
@@ -45,6 +48,11 @@ const FOUNDER_MEAN = {
   speed: 0.34, // slower off the mark; sprinting has to be evolved for
   metabolism: 0.54, // burns down faster, so an unfed fox has less runway
   fecundity: 0.28, // longer gestation and a higher bar to breed at all
+  // Lower than the rabbits' own founder mean (0.28, see rabbit.js), and
+  // below the usable threshold either way: a lake should start out as a
+  // place prey escapes to, and a fox lineage should have to earn its way in
+  // after the rabbits have already learned to use the water.
+  swimming: 0.22,
 }
 
 const MUTATION_RATE = 0.3 // per gene, per birth
@@ -154,6 +162,13 @@ export function foxStats(genes) {
     packSpeedBonus: lerp(0, 0.3, genes.packTendency),
     breedEnergy: lerp(BREED_ENERGY[0], BREED_ENERGY[1], genes.fecundity),
     gestationMs: lerp(GESTATION_MS[0], GESTATION_MS[1], genes.fecundity),
+    // Water (see water.js). A fox that cannot swim is stopped dead by a lake
+    // shore, which is precisely what makes swimming worth a rabbit evolving:
+    // the refuge only works while the predator is still landlocked.
+    swimSkill: genes.swimming ?? 0,
+    canSwim: canSwim(genes.swimming ?? 0),
+    swimSpeedFactor: swimSpeedFactor(genes.swimming ?? 0),
+    swimUpkeepMultiplier: swimDrainFactor(genes.swimming ?? 0),
   }
 }
 
@@ -196,5 +211,6 @@ export function describeFoxStats(genes) {
     `Rabbits only notice it at ${Math.round(s.stealthFactor * 100)}% of their normal spotting range.`,
     `Burns ${s.upkeepPerSec.toFixed(2)} energy/sec prowling and gains ${Math.round(s.energyPerKill)} per kill, so it needs a rabbit every ~${Math.round(s.energyPerKill / s.upkeepPerSec)}s to break even.`,
     `Hunts whenever its energy is below ${Math.round(s.huntBelowEnergy)} (${levelWord(genes.bloodlust)} desire to hunt), and can press a chase for ${s.maxSprintTicks} ticks before it has to break off.`,
+    describeSwimming(s.swimSkill),
   ]
 }

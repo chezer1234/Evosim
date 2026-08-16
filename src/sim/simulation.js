@@ -7,13 +7,24 @@
 // (see ./fox.js and docs/plans/issue-11-predator-foxes.md). Movement is
 // discrete tile-stepping either way - rabbits step on a fixed tick cadence
 // (slower swimming, faster running), foxes accumulate a fractional
-// tiles-per-tick budget so their speed gene can vary continuously.
+// tiles-per-tick budget so their speed gene can vary continuously. What the
+// *screen* shows is interpolated between those tile steps (see ./motion.js);
+// the grid below is unchanged, and stays the only thing the sim reasons
+// about.
+//
+// Water is terrain with an entry requirement (see ./water.js): both species
+// carry a heritable swim gene, and below the usable threshold a shoreline is
+// a wall rather than a slow patch. That is the one asymmetry a rabbit can
+// evolve into a genuine escape - a lake it can cross and the fox behind it
+// cannot.
 
-import { TILE } from '../worldgen/mapgen.js'
 import { createBrain, mutateBrain, think } from './brain.js'
 import { computeTraits } from './brainInsight.js'
 import { FOREST_VISION_FACTOR, FOX_ENERGY_MAX, FOX_GENE_KEYS, createFoxGenes, foxStats, mutateFoxGenes } from './fox.js'
 import { RABBIT_GENE_KEYS, alarmReach, createRabbitGenes, mutateRabbitGenes, rabbitStats } from './rabbit.js'
+import { HOP, SWIM, advanceMotion, attachMotion, beginMove, teleportMotion } from './motion.js'
+import { FLOUNDER_DRAIN_FACTOR, FLOUNDER_SPEED_FACTOR, isWaterTile, towardNearestLand } from './water.js'
+import { TILE } from '../worldgen/mapgen.js'
 import {
   BURROW_BUILD_ENERGY,
   BURROW_SENSE_RADIUS,
@@ -92,12 +103,16 @@ const PANIC_RADIUS = 2.5
 // species move a whole tile at a time and would otherwise swap places past
 // each other without ever "meeting".
 export const POUNCE_RANGE = 1
+// Decision ticks per tile for a rabbit that is in water it cannot swim - it
+// is splashing for the bank, not travelling. Slower than the worst genuine
+// swimmer (7, see rabbit.js) for the same reason it costs more energy: being
+// out of your depth is not the same as being slow at something you can do.
+const FLOUNDER_STROKE_TICKS = 8
 const FOX_FEED_MS = 1800 // stands over the carcass, out of the chase
 const FOX_START_ENERGY = 95
 const FOX_CUB_ENERGY = 70
 const FOX_REPRO_COST = 22
 const FOX_SPRINT_RANGE = 7 // only worth sprinting once the prey is this close
-const FOX_WATER_SPEED = 0.55 // foxes wade badly; rabbits swim slowly too
 const FOX_MAX_STEPS_PER_TICK = 2 // safety rail on the fractional step budget
 const FOX_PACK_KEEP_DISTANCE = 2.5 // don't crowd a packmate once alongside it
 // How loud a fox is to a rabbit's ears. Hearing is the sense camouflage
@@ -139,13 +154,11 @@ const SHELTER_ALL_CLEAR_TICKS = 10 // ticks with nothing detected before it will
 // rabbit uses the tunnel network and surfaces at a connected burrow instead.
 const BURROW_MOUTH_DANGER = 2.5
 
+const MOVE_DEADZONE = 0.3
+
 let nextRabbitId = 1
 let nextFoxId = 1
 
-function isWaterTile(map, x, y) {
-  const t = map.tileType[y * map.size + x]
-  return t === TILE.OCEAN || t === TILE.LAKE
-}
 function inBounds(map, x, y) {
   return x >= 0 && y >= 0 && x < map.size && y < map.size
 }
@@ -177,6 +190,10 @@ export function createSimulation(map) {
     selectedId: null,
     selectedKind: null, // 'rabbit' | 'fox' | null
     kills: 0,
+    // Anything that ran out of energy in water rather than on land. Tracked
+    // separately from starvation because it is a different story: a creature
+    // that drowned was somewhere its genes could not carry it.
+    drownings: 0,
     traitHistory: [],
     traitHistoryAccum: 0,
   }
@@ -246,7 +263,19 @@ export function spawnRabbit(sim, x, y, brain, startEnergy = ENERGY_START, genera
     // arbitrary initial value.
     searchHeading: Math.random() * Math.PI * 2,
     searchTicksLeft: 0,
+    // Water state, refreshed every decision tick: whether it is currently in
+    // water, and whether it is in water it has no business being in (see
+    // ./water.js). The renderer draws a swimming rabbit completely
+    // differently, so these are read every frame as well as every tick.
+    swimming: false,
+    floundering: false,
+    drowned: false,
   }
+  rabbit.swimming = isWaterTile(sim.map, x, y)
+  rabbit.floundering = rabbit.swimming && !rabbit.senses.canSwim
+  // Visual-only position/gait state (see ./motion.js), starting parked on
+  // the tile it was spawned on.
+  attachMotion(rabbit, Math.random() * Math.PI * 2)
   sim.rabbits.push(rabbit)
   return rabbit
 }
@@ -281,7 +310,13 @@ export function spawnFox(sim, x, y, genes, startEnergy = FOX_START_ENERGY, gener
     heading: Math.random() * Math.PI * 2,
     searchHeading: Math.random() * Math.PI * 2,
     searchTicksLeft: 0,
+    swimming: false,
+    floundering: false,
+    drowned: false,
   }
+  fox.swimming = isWaterTile(sim.map, x, y)
+  fox.floundering = fox.swimming && !foxStats(fox.genes).canSwim
+  attachMotion(fox, fox.heading)
   fox.sprintBudget = foxStats(fox.genes).maxSprintTicks
   sim.foxes.push(fox)
   return fox
@@ -433,19 +468,75 @@ function findNearestPackmate(sim, fox, radius) {
   return best ? { fox: best, dist: bestDist } : null
 }
 
-// How many decision ticks a rabbit waits between actual tile-steps: slow in
-// water, fast while running, medium otherwise.
-function stepEveryTicks(map, x, y, running) {
-  if (isWaterTile(map, x, y)) return 3
-  return running ? 1 : 2
+// How many decision ticks a rabbit waits between actual tile-steps: it
+// depends on its own swim gene once it is in the water (2-7 ticks a tile,
+// see rabbitStats), on whether it is running on land, and on nothing at all
+// if it is out of its depth - a floundering rabbit is just splashing.
+function stepEveryTicks(map, rabbit, running) {
+  if (!isWaterTile(map, rabbit.x, rabbit.y)) return running ? 1 : 2
+  return rabbit.senses.canSwim ? rabbit.senses.swimStrokeTicks : FLOUNDER_STROKE_TICKS
 }
 
-function attemptStep(sim, rabbit, dirX, dirY) {
+/**
+ * Can this rabbit put itself on that tile? Terrain first, then the swim gene:
+ * a rabbit that cannot swim treats a lake shore as solid, which is what turns
+ * water into a barrier for some lineages and a road for others.
+ *
+ * The gate is on *entering* water, not on being in it. Something already out
+ * of its depth has to be able to move through water to reach a bank at all -
+ * gating that too would pin a floundering creature in place until it drowned,
+ * which is a trap rather than a mechanic.
+ */
+function canRabbitEnter(sim, rabbit, x, y) {
+  if (!isPlaceable(sim.map, x, y)) return false
+  if (!isWaterTile(sim.map, x, y)) return true
+  return rabbit.senses.canSwim || isWaterTile(sim.map, rabbit.x, rabbit.y)
+}
+
+function attemptStep(sim, rabbit, dirX, dirY, durationMs) {
   const nx = rabbit.x + dirX
   const ny = rabbit.y + dirY
-  if (!isPlaceable(sim.map, nx, ny)) return
+  if (!canRabbitEnter(sim, rabbit, nx, ny)) return false
   rabbit.x = nx
   rabbit.y = ny
+  // The tile moved; the *sprite* starts travelling there over the same
+  // duration the next step is due in, so it arrives just as it is asked to
+  // leave again (see ./motion.js).
+  beginMove(rabbit, nx, ny, durationMs, isWaterTile(sim.map, nx, ny) ? SWIM : HOP)
+  return true
+}
+
+// One tile-step along a direction vector, sliding along whichever single axis
+// is open if the diagonal is blocked - the same treatment foxes get (see
+// stepFoxOnce). Without it a rabbit pinned diagonally against a shoreline
+// just vibrates in place instead of running along the bank, which now matters
+// far more often: for a non-swimmer, every lake edge is a wall.
+function stepRabbitOnce(sim, rabbit, moveX, moveY, durationMs) {
+  const dirX = moveX > MOVE_DEADZONE ? 1 : moveX < -MOVE_DEADZONE ? -1 : 0
+  const dirY = moveY > MOVE_DEADZONE ? 1 : moveY < -MOVE_DEADZONE ? -1 : 0
+  if (dirX === 0 && dirY === 0) return false
+  if (attemptStep(sim, rabbit, dirX, dirY, durationMs)) return true
+  if (dirX !== 0 && attemptStep(sim, rabbit, dirX, 0, durationMs)) return true
+  return dirY !== 0 && attemptStep(sim, rabbit, 0, dirY, durationMs)
+}
+
+/** Refresh the water flags the energy loop and the renderer read. */
+function updateWaterState(entity, sim, canSwimNow) {
+  entity.swimming = isWaterTile(sim.map, entity.x, entity.y)
+  entity.floundering = entity.swimming && !canSwimNow
+}
+
+/**
+ * One decision tick for something that is in water it cannot swim - dropped
+ * in a lake by the spawn palette, essentially. It has no opinions left: it
+ * splashes toward the nearest shore and burns energy doing it, and if the
+ * shore is too far it drowns. That is the honest outcome of putting a
+ * non-swimmer in a lake, and it is the same rule for both species.
+ */
+function flounderToward(sim, entity) {
+  const land = towardNearestLand(sim.map, entity.x, entity.y)
+  if (!land) return { x: Math.cos(entity.searchHeading), y: Math.sin(entity.searchHeading) }
+  return land
 }
 
 function tryEat(sim, rabbit) {
@@ -583,6 +674,11 @@ function runShelteredTick(sim, rabbit, burrow, out, threat) {
     if (escape) {
       leaveBurrow(sim.burrows, rabbit)
       enterBurrow(escape, rabbit)
+      // It came up somewhere else entirely: snap the sprite to the new mouth
+      // rather than gliding it across the ground it actually tunnelled under.
+      rabbit.x = escape.x
+      rabbit.y = escape.y
+      teleportMotion(rabbit, escape.x, escape.y)
       rabbit.shelterTicks = 0
       return
     }
@@ -594,12 +690,26 @@ function runShelteredTick(sim, rabbit, burrow, out, threat) {
   rabbit.shelterTicks = 0
 }
 
-const MOVE_DEADZONE = 0.3
-
 function runDecisionTick(sim, rabbit) {
   const { map } = sim
   const stats = rabbit.senses
   const sheltered = currentBurrow(sim, rabbit)
+
+  // Out of its depth: nothing else about this tick matters. A rabbit that
+  // cannot swim but is nonetheless in water swims for the bank and nothing
+  // else - it can't eat out there, and a fox is the least of its problems.
+  if (!sheltered && rabbit.swimming && !stats.canSwim) {
+    rabbit.running = false
+    rabbit.resting = false
+    rabbit.searching = false
+    rabbit.fleeing = false
+    updateSearchHeading(rabbit)
+    const land = flounderToward(sim, rabbit)
+    rabbit.stepPhase = (rabbit.stepPhase + 1) % FLOUNDER_STROKE_TICKS
+    if (rabbit.stepPhase === 0) stepRabbitOnce(sim, rabbit, land.x, land.y, FLOUNDER_STROKE_TICKS * TICK_MS)
+    updateWaterState(rabbit, sim, stats.canSwim)
+    return
+  }
   // Underground it can still hear, but it can't see the surface - no apples,
   // no watching the fox it's hiding from.
   const apple = sheltered ? null : findNearestApple(sim, rabbit.x, rabbit.y)
@@ -784,13 +894,15 @@ function runDecisionTick(sim, rabbit) {
     moveY = dy / len
   }
 
-  const stepEvery = stepEveryTicks(map, rabbit.x, rabbit.y, rabbit.running)
+  const stepEvery = stepEveryTicks(map, rabbit, rabbit.running)
   rabbit.stepPhase = (rabbit.stepPhase + 1) % stepEvery
   if (!rabbit.resting && rabbit.stepPhase === 0) {
-    const dirX = moveX > MOVE_DEADZONE ? 1 : moveX < -MOVE_DEADZONE ? -1 : 0
-    const dirY = moveY > MOVE_DEADZONE ? 1 : moveY < -MOVE_DEADZONE ? -1 : 0
-    if (dirX !== 0 || dirY !== 0) attemptStep(sim, rabbit, dirX, dirY)
+    // The step is given the whole interval until the next one as its travel
+    // time, so a hop lands right as the following one is due and a swimmer
+    // glides continuously rather than twitching once per cadence.
+    stepRabbitOnce(sim, rabbit, moveX, moveY, stepEvery * TICK_MS)
   }
+  updateWaterState(rabbit, sim, stats.canSwim)
 
   tryEat(sim, rabbit)
   tryReproduce(sim, rabbit, !rabbit.fleeing && out.reproduceDesire > 0.5)
@@ -798,13 +910,22 @@ function runDecisionTick(sim, rabbit) {
 
 function stepRabbit(sim, rabbit, dtMs) {
   rabbit.energyAccum += dtMs
-  const threshold = rabbit.running ? ENERGY_DEPLETE_RUN_MS : ENERGY_DEPLETE_NORMAL_MS
+  // Staying afloat is work: a weak swimmer burns over three times what it
+  // would walking (see swimDrainFactor), and anything out of its depth burns
+  // more again. That cost is the entire reason a lake is a gamble rather
+  // than a free hiding place.
+  const swimDrain = rabbit.floundering ? FLOUNDER_DRAIN_FACTOR : rabbit.swimming ? rabbit.senses.swimDrainFactor : 1
+  const threshold = (rabbit.running ? ENERGY_DEPLETE_RUN_MS : ENERGY_DEPLETE_NORMAL_MS) / swimDrain
   while (rabbit.energyAccum >= threshold) {
     rabbit.energyAccum -= threshold
     rabbit.energy -= 1
     if (rabbit.energy <= 0) {
       rabbit.energy = 0
       rabbit.alive = false
+      if (rabbit.swimming) {
+        rabbit.drowned = true
+        sim.drownings += 1
+      }
       return
     }
   }
@@ -819,6 +940,11 @@ function stepRabbit(sim, rabbit, dtMs) {
     rabbit.tickAccum -= TICK_MS
     runDecisionTick(sim, rabbit)
   }
+
+  // Visual state last, and by exactly the dt that was just simulated: any
+  // step the ticks above issued starts travelling in the same frame it was
+  // taken, rather than a frame behind it (see ./motion.js).
+  advanceMotion(rabbit, dtMs)
 }
 
 // ================================ Foxes ==================================
@@ -826,12 +952,18 @@ function stepRabbit(sim, rabbit, dtMs) {
 // I still run? Everything nuanced about it lives in its genes rather than in
 // branching here (see ./fox.js) - this function just reads the dials.
 
-function tryFoxStep(sim, fox, dirX, dirY) {
+function tryFoxStep(sim, fox, dirX, dirY, stats, durationMs) {
   const nx = fox.x + dirX
   const ny = fox.y + dirY
   if (!isPlaceable(sim.map, nx, ny)) return false
+  // The same waterline the rabbits face (see canRabbitEnter): a landlocked
+  // fox breaks off at the shore, which is what a swimming rabbit is buying.
+  // And the same exemption - already being in the water is not a reason to
+  // be stuck in it.
+  if (isWaterTile(sim.map, nx, ny) && !stats.canSwim && !isWaterTile(sim.map, fox.x, fox.y)) return false
   fox.x = nx
   fox.y = ny
+  beginMove(fox, nx, ny, durationMs, isWaterTile(sim.map, nx, ny) ? SWIM : HOP)
   return true
 }
 
@@ -839,26 +971,30 @@ function tryFoxStep(sim, fox, dirX, dirY) {
 // coastline, typically) it slides along whichever single axis is still open
 // instead of stalling - a fox that gets stuck on a headland while its dinner
 // hops away isn't scary.
-function stepFoxOnce(sim, fox, moveX, moveY) {
+function stepFoxOnce(sim, fox, moveX, moveY, stats, durationMs) {
   const dirX = moveX > MOVE_DEADZONE ? 1 : moveX < -MOVE_DEADZONE ? -1 : 0
   const dirY = moveY > MOVE_DEADZONE ? 1 : moveY < -MOVE_DEADZONE ? -1 : 0
   if (dirX === 0 && dirY === 0) return
-  if (tryFoxStep(sim, fox, dirX, dirY)) return
-  if (dirX !== 0 && tryFoxStep(sim, fox, dirX, 0)) return
-  if (dirY !== 0) tryFoxStep(sim, fox, 0, dirY)
+  if (tryFoxStep(sim, fox, dirX, dirY, stats, durationMs)) return
+  if (dirX !== 0 && tryFoxStep(sim, fox, dirX, 0, stats, durationMs)) return
+  if (dirY !== 0) tryFoxStep(sim, fox, 0, dirY, stats, durationMs)
 }
 
 // Fractional movement: a fox banks `tilesPerTick` of credit each decision
 // tick and steps a whole tile every time that crosses 1. A slow fox moves
 // every third tick, a fast one every tick and occasionally twice - all from
 // one continuous gene, rather than the integer tick cadence rabbits use.
-function moveFox(sim, fox, moveX, moveY, tilesPerTick) {
+function moveFox(sim, fox, moveX, moveY, tilesPerTick, stats) {
   fox.stepCredit += tilesPerTick
   let steps = 0
+  // How long one tile *should* take at this pace, which is what the sprite
+  // is given to travel it in - so a prowling fox glides and a sprinting one
+  // covers the ground visibly faster (see ./motion.js).
+  const durationMs = Math.max(60, Math.min(4, 1 / Math.max(0.05, tilesPerTick)) * TICK_MS)
   while (fox.stepCredit >= 1 && steps < FOX_MAX_STEPS_PER_TICK) {
     fox.stepCredit -= 1
     steps += 1
-    stepFoxOnce(sim, fox, moveX, moveY)
+    stepFoxOnce(sim, fox, moveX, moveY, stats, durationMs)
   }
   if (fox.stepCredit >= 1) fox.stepCredit = 1 - 1e-6 // don't bank an unbounded backlog
 }
@@ -908,6 +1044,20 @@ function finishFoxGestation(sim, fox) {
 
 function runFoxDecisionTick(sim, fox) {
   const stats = foxStats(fox.genes)
+
+  // Out of its depth, same rule as the rabbits: swim for the bank or drown
+  // trying. A fox in this state is not hunting anything.
+  if (fox.floundering) {
+    fox.hunting = false
+    fox.sprinting = false
+    fox.packing = false
+    const land = towardNearestLand(sim.map, fox.x, fox.y)
+    const dir = land || { x: Math.cos(fox.searchHeading), y: Math.sin(fox.searchHeading) }
+    fox.heading = Math.atan2(dir.y, dir.x)
+    moveFox(sim, fox, dir.x, dir.y, stats.prowlTilesPerTick * FLOUNDER_SPEED_FACTOR, stats)
+    updateWaterState(fox, sim, stats.canSwim)
+    return
+  }
   // Mid-meal: it stands over the carcass rather than immediately chasing
   // the next rabbit, which is both realistic and the thing that stops one
   // fast fox from clearing a whole warren in a few seconds.
@@ -973,9 +1123,15 @@ function runFoxDecisionTick(sim, fox) {
 
   if (!fox.sprinting) fox.sprintBudget = Math.min(stats.maxSprintTicks, fox.sprintBudget + 0.5 + fox.genes.stamina)
   if (moveX !== 0 || moveY !== 0) fox.heading = Math.atan2(moveY, moveX)
-  if (isWaterTile(sim.map, fox.x, fox.y)) tilesPerTick *= FOX_WATER_SPEED
+  // Swimming is not sprinting: whatever the chase was, in the water it is a
+  // paddle at whatever fraction of its pace the fox's swim gene allows.
+  if (fox.swimming) {
+    fox.sprinting = false
+    tilesPerTick = stats.prowlTilesPerTick * stats.swimSpeedFactor
+  }
 
-  moveFox(sim, fox, moveX, moveY, tilesPerTick)
+  moveFox(sim, fox, moveX, moveY, tilesPerTick, stats)
+  updateWaterState(fox, sim, stats.canSwim)
   tryPounce(sim, fox, stats)
   tryFoxReproduce(sim, fox, stats)
 }
@@ -984,10 +1140,15 @@ function stepFox(sim, fox, dtMs) {
   const stats = foxStats(fox.genes)
   // Continuous drain rather than the rabbits' whole-number ticks: a fox's
   // burn rate is a gene, so it needs the resolution.
-  fox.energy -= stats.upkeepPerSec * (fox.sprinting ? stats.sprintUpkeepMultiplier : 1) * (dtMs / 1000)
+  const swimDrain = fox.floundering ? FLOUNDER_DRAIN_FACTOR : fox.swimming ? stats.swimUpkeepMultiplier : 1
+  fox.energy -= stats.upkeepPerSec * (fox.sprinting ? stats.sprintUpkeepMultiplier : 1) * swimDrain * (dtMs / 1000)
   if (fox.energy <= 0) {
     fox.energy = 0
     fox.alive = false
+    if (fox.swimming) {
+      fox.drowned = true
+      sim.drownings += 1
+    }
     return
   }
 
@@ -1002,6 +1163,8 @@ function stepFox(sim, fox, dtMs) {
     fox.tickAccum -= TICK_MS
     runFoxDecisionTick(sim, fox)
   }
+
+  advanceMotion(fox, dtMs)
 }
 
 function regrowApples(sim) {

@@ -23,10 +23,17 @@ src/
                      units they map to (speed, vision, camouflage, metabolism, …)
     burrow.js        The warren: capacity, digging rules, and the tunnel network
                      rabbits can move through (framework-agnostic, pure functions)
+    water.js         Swimming: the shared skill curve behind both species' swim
+                     genes, the threshold below which water is impassable, and the
+                     nearest-land search a floundering creature steers by
+    motion.js        The visual layer over the tile grid: interpolated positions,
+                     hop/glide easing, and the pose (lift, shadow, stride, stroke)
+                     the renderer draws each frame
     simulation.js    Entity state, both species' per-tick decision loops, predation,
                      hearing/alarm calls, sheltering, energy/lifecycle, reproduction
     brainInsight.js  Derives human-readable trait summaries from a brain's raw weights
-    render.js        Draws rabbits, foxes and burrows onto the map canvas
+    render.js        Draws rabbits, foxes and burrows onto the map canvas - two
+                     distinct animations per species, on land and in the water
 ```
 
 The two species are deliberately modelled differently: a rabbit's *behaviour* is an
@@ -39,6 +46,13 @@ an explicit gene vector (`rabbit.js`) in the same style as the fox's — ear siz
 hardware, not an opinion a weight matrix can hold. See
 [`docs/plans/issue-14-rabbit-survival.md`](plans/issue-14-rabbit-survival.md), which
 also covers the predator/prey rebalance and the burrow model.
+
+Swimming is a gene in the same sense, shared by both species (`water.js`), and the
+one place where the *drawing* of a creature diverges completely from its land pose.
+The tile grid the sim reasons about is unchanged by any of it: what moves smoothly is
+a separate visual position maintained by `motion.js`, which cannot affect where
+anything actually is. See
+[`docs/plans/smooth-motion-and-swimming.md`](plans/smooth-motion-and-swimming.md).
 
 `docs/plans/` holds the implementation plans written for each feature/issue, kept for context on *why* something works the way it does.
 
@@ -58,7 +72,9 @@ npm test          # run once (used by CI)
 npm run test:watch
 ```
 
-Tests live alongside the source they cover (`*.test.js`) and run on [Vitest](https://vitest.dev). They focus on the pure logic — map-generation invariants, the brain's forward pass and mutation, the fox genome (mutation bounds, founder weighting, and every gene's mapping to sim units), the rabbit's sense genes and burrow model, the rabbit lifecycle (movement bounds, eating, energy depletion/death, reproduction), predation (hunting, pouncing, fleeing, camouflage, forest cover, pack behaviour), the issue #14 survival kit (hearing beyond sight, alarm calls between rabbits, digging/capacity/sheltering), and the map view's pan/zoom/pinch maths (`worldgen/viewport.js`) — since that's the code with real behavior to get wrong. Rendering and React components aren't covered yet.
+Tests live alongside the source they cover (`*.test.js`) and run on [Vitest](https://vitest.dev). They focus on the pure logic — map-generation invariants, the brain's forward pass and mutation, the fox genome (mutation bounds, founder weighting, and every gene's mapping to sim units), the rabbit's sense genes and burrow model, the rabbit lifecycle (movement bounds, eating, energy depletion/death, reproduction), predation (hunting, pouncing, fleeing, camouflage, forest cover, pack behaviour), the issue #14 survival kit (hearing beyond sight, alarm calls between rabbits, digging/capacity/sheltering), swimming (the skill threshold, pace/energy curves, drowning, floundering back to shore), the motion layer's interpolation and poses, and the map view's pan/zoom/pinch maths (`worldgen/viewport.js`) — since that's the code with real behavior to get wrong.
+
+`sim/render.test.js` is the one exception to "rendering isn't covered": it runs the draw path against a recording canvas stub to pin down the *choice* between the land and water animations (shadow versus waterline clip) and that sprites are drawn at their interpolated position, not their tile. React components still aren't covered.
 
 Balance changes are worth checking against the whole ecosystem rather than a unit
 test: a headless script that runs `stepSimulation` for several simulated minutes

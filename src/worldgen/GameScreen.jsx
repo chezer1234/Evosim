@@ -3,6 +3,7 @@ import { drawMap } from './mapgen.js'
 import { createSimulation, isPlaceable, selectCreature, spawnFox, spawnRabbit, stepSimulation } from '../sim/simulation.js'
 import { drawSimulation } from '../sim/render.js'
 import { computeTraits, describeEnergyEffects, describeTraits } from '../sim/brainInsight.js'
+import { foxStats } from '../sim/fox.js'
 import { describeRabbitSenses } from '../sim/rabbit.js'
 import RabbitInsights from './RabbitInsights.jsx'
 import FoxInsights from './FoxInsights.jsx'
@@ -64,6 +65,8 @@ function buildInsightsData(sim) {
         genes: rabbit.genes,
         senseNotes: describeRabbitSenses(rabbit.genes),
         sheltered: rabbit.burrowId != null,
+        swimming: rabbit.swimming,
+        floundering: rabbit.floundering,
         calling: rabbit.alarmUntil > sim.clock,
         alarmHeard: rabbit.alarmHeard,
         heardOnly: rabbit.heardOnly,
@@ -86,6 +89,8 @@ function buildInsightsData(sim) {
         sprinting: fox.sprinting,
         packing: fox.packing,
         feeding: fox.feedingRemaining > 0,
+        swimming: fox.swimming,
+        floundering: fox.floundering,
         gestating: fox.gestating,
         kills: fox.kills,
       }
@@ -100,6 +105,10 @@ function buildInsightsData(sim) {
     kills: sim.kills,
     burrows: sim.burrows.length,
     sheltered: rabbits.filter((r) => r.burrowId != null).length,
+    // Counted across both species: "how much of what is alive out there can
+    // get into the water" is the number that moves as the gene spreads.
+    swimmers: rabbits.filter((r) => r.senses.canSwim).length + foxes.filter((f) => foxStats(f.genes).canSwim).length,
+    drownings: sim.drownings,
     generationRange: generationRangeOf(rabbits),
     foxGenerationRange: generationRangeOf(foxes),
   }
@@ -437,6 +446,27 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
     }
 
     measureAndResize(true)
+
+    // Dev-only handle on the live sim and view. There is no other way to
+    // reach either from outside React (both are refs the render loop mutates
+    // in place), which makes staging a specific situation - a rabbit with a
+    // known swim gene, dropped in a specific lake, at a known zoom - either
+    // impossible or a matter of spawning creatures and hoping. Vite strips
+    // this branch from a production build.
+    if (import.meta.env.DEV) {
+      window.__evosim = {
+        getSim: () => simRef.current,
+        getView: () => viewRef.current,
+        setView: (patch) => {
+          viewRef.current = { ...viewRef.current, ...patch }
+          reportZoom()
+        },
+        setPaused: (value) => {
+          pausedRef.current = value
+          setPaused(value)
+        },
+      }
+    }
 
     // Continuous render loop: redraws every frame using whatever the view
     // refs currently hold, so pan/zoom (mutated directly by the handlers
@@ -844,6 +874,8 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
               kills={insightsData?.kills ?? counts.kills}
               burrows={insightsData?.burrows ?? 0}
               sheltered={insightsData?.sheltered ?? 0}
+              swimmers={insightsData?.swimmers ?? 0}
+              drownings={insightsData?.drownings ?? 0}
               history={insightsData?.history ?? []}
               generationRange={insightsData?.generationRange ?? null}
               foxGenerationRange={insightsData?.foxGenerationRange ?? null}
