@@ -172,12 +172,24 @@ const SLOTS = {
     spawn: 'pointer-events-none absolute inset-x-1.5 top-[38%] bottom-1.5 flex flex-col justify-end',
   },
   // Phone sideways: down the right edge, because the map area there is only
-  // a couple of hundred pixels tall but plenty wide.
+  // a couple of hundred pixels tall but plenty wide. The hint moves out of
+  // the centre to match (see HINT_CLASS) - centred, it would end up behind
+  // the panel.
   side: {
     population: 'pointer-events-none absolute top-1.5 right-1.5 bottom-1.5 flex w-[min(20rem,45%)] flex-col',
     inspector: 'pointer-events-none absolute top-1.5 right-1.5 bottom-1.5 flex w-[min(20rem,45%)] flex-col',
     spawn: 'pointer-events-none absolute top-1.5 right-1.5 bottom-1.5 flex w-[min(18rem,42%)] flex-col',
   },
+}
+
+// The one-line "how do I drive this" note over the map. On a compact screen
+// it gets a background, because it sits over the island rather than in the
+// margin below it.
+const HINT_PILL = 'pointer-events-none absolute top-2 max-w-[95%] rounded-full bg-neutral-950/80 px-3 py-1 text-center text-[11px] whitespace-nowrap text-neutral-300'
+const HINT_CLASS = {
+  corner: 'pointer-events-none absolute bottom-3 left-1/2 max-w-[95%] -translate-x-1/2 text-center text-[11px] text-neutral-500',
+  sheet: `${HINT_PILL} left-1/2 -translate-x-1/2`,
+  side: `${HINT_PILL} left-2`,
 }
 
 export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
@@ -195,7 +207,8 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
 
   const compact = useIsCompact()
   const touch = useIsTouch()
-  const slots = SLOTS[usePanelPlacement()]
+  const placement = usePanelPlacement()
+  const slots = SLOTS[placement]
   // The panel toggles below are bound once inside the render-loop effect and
   // in callbacks that shouldn't churn on every layout change, so the compact
   // flag is mirrored into a ref the same way the sim state is.
@@ -809,17 +822,7 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
         className={`relative flex min-h-0 flex-1 items-center justify-center ${compact ? 'p-1.5' : 'p-5'}`}
       >
         <canvas ref={canvasRef} className="touch-none rounded-sm bg-[#16324a] shadow-2xl shadow-black/40" />
-        {hintVisible ? (
-          <p
-            className={
-              compact
-                ? 'pointer-events-none absolute top-2 left-1/2 max-w-[95%] -translate-x-1/2 rounded-full bg-neutral-950/80 px-3 py-1 text-center text-[11px] whitespace-nowrap text-neutral-300'
-                : 'pointer-events-none absolute bottom-3 left-1/2 max-w-[95%] -translate-x-1/2 text-center text-[11px] text-neutral-500'
-            }
-          >
-            {hint}
-          </p>
-        ) : null}
+        {hintVisible ? <p className={HINT_CLASS[placement]}>{hint}</p> : null}
         {/* Overlaid on top of the map (not laid out beside it) so opening
             any panel never resizes or shifts the canvas underneath. On a
             compact screen they span the width as a bottom sheet instead of
