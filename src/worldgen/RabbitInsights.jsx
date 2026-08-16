@@ -6,6 +6,8 @@
 
 import { TRAIT_META } from '../sim/brainInsight.js'
 import BrainNetworkDiagram from './BrainNetworkDiagram.jsx'
+import { CloseButton, PANEL_SHELL } from './panelChrome.jsx'
+import { useIsTouch } from './useIsCompact.js'
 
 function TraitBar({ label, value, color }) {
   const pct = Math.round(value * 100)
@@ -21,13 +23,12 @@ function TraitBar({ label, value, color }) {
 }
 
 export default function RabbitInsights({ selected, onClose }) {
+  const touch = useIsTouch()
   return (
-    <div className="pointer-events-auto flex max-h-full w-80 flex-col gap-4 overflow-y-auto rounded-lg border border-neutral-800 bg-neutral-900/95 p-4 text-neutral-200 shadow-2xl shadow-black/40 backdrop-blur-sm">
+    <div className={`${PANEL_SHELL} gap-4 border-neutral-800 p-4`}>
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-semibold text-neutral-100">🧠 Rabbit brains</h2>
-        <button type="button" onClick={onClose} aria-label="Close" className="text-neutral-500 transition hover:text-neutral-200">
-          ✕
-        </button>
+        <CloseButton onClose={onClose} />
       </div>
 
       {selected ? (
@@ -53,14 +54,14 @@ export default function RabbitInsights({ selected, onClose }) {
           </ul>
           <div className="flex flex-col gap-1 border-t border-neutral-800 pt-3">
             <h4 className="text-xs font-semibold tracking-wide text-neutral-500 uppercase">Neural net</h4>
-            <p className="text-[10px] text-neutral-600">Green = pulls toward, red = pulls away. Brighter/thicker = stronger. Hover a line or dot for its exact weight.</p>
+            <p className="text-[10px] text-neutral-600">Green = pulls toward, red = pulls away. Brighter/thicker = stronger.</p>
             <div className="rounded-sm border border-neutral-800 bg-neutral-950 p-1">
               <BrainNetworkDiagram brain={selected.brain} />
             </div>
           </div>
         </section>
       ) : (
-        <p className="text-[11px] text-neutral-600">Click a rabbit on the map to see its brain.</p>
+        <p className="text-[11px] text-neutral-600">{touch ? 'Tap' : 'Click'} a rabbit on the map to see its brain.</p>
       )}
     </div>
   )
