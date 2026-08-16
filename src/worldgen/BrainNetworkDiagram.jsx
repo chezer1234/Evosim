@@ -1,6 +1,8 @@
-// A literal (but simplified) picture of a rabbit's brain: the actual
-// input -> hidden -> output network from sim/brain.js, drawn as nodes and
-// weighted edges instead of a wall of numbers. "Simplified" because it
+// A literal (but simplified) picture of a creature's brain: the actual
+// input -> hidden -> output network - a rabbit's (sim/brain.js) or a fox's
+// (sim/foxBrain.js), since the two nets differ only in their shape and
+// labels - drawn as nodes and weighted edges instead of a wall of numbers.
+// "Simplified" because it
 // draws every connection but lets weight do the talking - near-zero
 // weights fade to almost invisible, so only the pathways that actually
 // steer the rabbit stand out. Green = excites the output, red = suppresses
@@ -15,7 +17,7 @@
 // number for the trait bars; this one shows the actual wiring in between.
 
 import { useEffect, useState } from 'react'
-import { HIDDEN_SIZE, INPUT_SIZE, OUTPUT_SIZE, WEIGHT_CLAMP } from '../sim/brain.js'
+import { BRAIN_SHAPE, WEIGHT_CLAMP } from '../sim/brain.js'
 import { INPUT_LABELS, OUTPUT_LABELS } from '../sim/brainInsight.js'
 
 const W = 400
@@ -64,23 +66,26 @@ function Edge({ x1, y1, x2, y2, w, label, onPick, active }) {
   )
 }
 
-export default function BrainNetworkDiagram({ brain }) {
+/** `shape`/`inputLabels`/`outputLabels` default to the rabbit's net, so the
+ * fox panel is the only caller that has to say which brain it is drawing. */
+export default function BrainNetworkDiagram({ brain, shape = BRAIN_SHAPE, inputLabels = INPUT_LABELS, outputLabels = OUTPUT_LABELS }) {
   const { w1, b1, w2, b2 } = brain
+  const { inputs: inputSize, hidden: hiddenSize, outputs: outputSize } = shape
   const [picked, setPicked] = useState(null)
 
-  // A different rabbit is a different network, so last rabbit's selection
+  // A different creature is a different network, so the last one's selection
   // would be pointing at a connection that no longer exists.
   useEffect(() => setPicked(null), [brain])
 
-  const inY = layerYs(INPUT_SIZE)
-  const hidY = layerYs(HIDDEN_SIZE)
-  const outY = layerYs(OUTPUT_SIZE)
+  const inY = layerYs(inputSize)
+  const hidY = layerYs(hiddenSize)
+  const outY = layerYs(outputSize)
   const isActive = (label) => picked?.label === label
 
   const edges1 = []
-  for (let i = 0; i < INPUT_SIZE; i++) {
-    for (let h = 0; h < HIDDEN_SIZE; h++) {
-      const label = `${INPUT_LABELS[i]} → hidden ${h + 1}`
+  for (let i = 0; i < inputSize; i++) {
+    for (let h = 0; h < hiddenSize; h++) {
+      const label = `${inputLabels[i]} → hidden ${h + 1}`
       edges1.push(
         <Edge
           key={`i${i}h${h}`}
@@ -88,7 +93,7 @@ export default function BrainNetworkDiagram({ brain }) {
           y1={inY[i]}
           x2={LAYER_X.hidden}
           y2={hidY[h]}
-          w={w1[i * HIDDEN_SIZE + h]}
+          w={w1[i * hiddenSize + h]}
           label={label}
           active={isActive(label)}
           onPick={setPicked}
@@ -97,9 +102,9 @@ export default function BrainNetworkDiagram({ brain }) {
     }
   }
   const edges2 = []
-  for (let h = 0; h < HIDDEN_SIZE; h++) {
-    for (let o = 0; o < OUTPUT_SIZE; o++) {
-      const label = `hidden ${h + 1} → ${OUTPUT_LABELS[o]}`
+  for (let h = 0; h < hiddenSize; h++) {
+    for (let o = 0; o < outputSize; o++) {
+      const label = `hidden ${h + 1} → ${outputLabels[o]}`
       edges2.push(
         <Edge
           key={`h${h}o${o}`}
@@ -107,7 +112,7 @@ export default function BrainNetworkDiagram({ brain }) {
           y1={hidY[h]}
           x2={LAYER_X.output}
           y2={outY[o]}
-          w={w2[h * OUTPUT_SIZE + o]}
+          w={w2[h * outputSize + o]}
           label={label}
           active={isActive(label)}
           onPick={setPicked}
@@ -124,11 +129,11 @@ export default function BrainNetworkDiagram({ brain }) {
         <g>{edges1}</g>
         <g>{edges2}</g>
         {inY.map((y, i) => (
-          <g key={`in${i}`} onClick={() => setPicked({ label: INPUT_LABELS[i], value: null })} style={{ cursor: 'pointer' }}>
+          <g key={`in${i}`} onClick={() => setPicked({ label: inputLabels[i], value: null })} style={{ cursor: 'pointer' }}>
             <circle cx={LAYER_X.input} cy={y} r={NODE_R.input + 6} fill="transparent" />
             <circle cx={LAYER_X.input} cy={y} r={NODE_R.input} fill="rgb(96,165,250)" />
             <text x={LAYER_X.input - 10} y={y + 3} textAnchor="end" fontSize={LABEL_SIZE} fill="rgb(163,163,163)">
-              {INPUT_LABELS[i]}
+              {inputLabels[i]}
             </text>
           </g>
         ))}
@@ -141,13 +146,13 @@ export default function BrainNetworkDiagram({ brain }) {
           </g>
         ))}
         {outY.map((y, o) => (
-          <g key={`out${o}`} onClick={() => setPicked({ label: `${OUTPUT_LABELS[o]} bias`, value: b2[o] })} style={{ cursor: 'pointer' }}>
+          <g key={`out${o}`} onClick={() => setPicked({ label: `${outputLabels[o]} bias`, value: b2[o] })} style={{ cursor: 'pointer' }}>
             <circle cx={LAYER_X.output} cy={y} r={NODE_R.output + 6} fill="transparent" />
             <circle cx={LAYER_X.output} cy={y} r={NODE_R.output} fill="rgb(244,114,182)">
               <title>{`bias ${b2[o].toFixed(2)}`}</title>
             </circle>
             <text x={LAYER_X.output + 10} y={y + 3} textAnchor="start" fontSize={LABEL_SIZE} fill="rgb(163,163,163)">
-              {OUTPUT_LABELS[o]}
+              {outputLabels[o]}
             </text>
           </g>
         ))}

@@ -6,6 +6,7 @@
 
 import { TRAIT_META } from '../sim/brainInsight.js'
 import { FOX_GENE_META } from '../sim/fox.js'
+import { FOX_TRAIT_META } from '../sim/foxInsight.js'
 import { RABBIT_GENE_META } from '../sim/rabbit.js'
 import { CloseButton, PANEL_SHELL } from './panelChrome.jsx'
 
@@ -45,7 +46,10 @@ function TrendRow({ label, history, valueOf, color }) {
 const TREND_KEYS = ['foodDrive', 'searchDrive', 'broodiness', 'skittishness', 'burrowInstinct', 'heedsAlarm']
 // The fox genes worth watching drift: the ones that decide whether the
 // rabbits get away.
-const FOX_TREND_KEYS = ['speed', 'vision', 'camouflage', 'bloodlust', 'packTendency']
+const FOX_TREND_KEYS = ['speed', 'vision', 'camouflage', 'metabolism', 'packTendency']
+// And the instincts, off the fox's own neural net: what a lineage has
+// *learned* to do with that body (see sim/foxInsight.js).
+const FOX_INSTINCT_KEYS = ['aggression', 'tracking', 'idleness', 'broodiness', 'patience']
 
 const POP_CHART_W = 220
 const POP_CHART_H = 46
@@ -97,6 +101,7 @@ function PopulationChart({ history }) {
 export default function PopulationPanel({ population, foxPopulation, kills, burrows, sheltered, swimmers, drownings, history, generationRange, foxGenerationRange, mapInfo, onClose }) {
   const latest = history[history.length - 1]
   const hasFoxTrend = history.some((s) => s.foxGenes)
+  const hasFoxInstinctTrend = history.some((s) => s.foxTraits)
   const hasSenseTrend = history.some((s) => s.rabbitGenes)
 
   return (
@@ -149,9 +154,21 @@ export default function PopulationPanel({ population, foxPopulation, kills, burr
           ) : null}
           {hasFoxTrend ? (
             <div className="flex flex-col gap-2 border-t border-neutral-800 pt-2">
-              <h3 className="text-[10px] font-semibold tracking-wide text-orange-400/80 uppercase">Fox genes</h3>
+              <h3 className="text-[10px] font-semibold tracking-wide text-orange-400/80 uppercase">Fox bodies</h3>
               {FOX_GENE_META.filter((m) => FOX_TREND_KEYS.includes(m.key)).map((m) => (
                 <TrendRow key={m.key} label={m.label} history={history} valueOf={(s) => s.foxGenes?.[m.key] ?? null} color={m.color} />
+              ))}
+            </div>
+          ) : null}
+          {/* The other half of a fox: its brain. Bodies drift slowly and
+              visibly; instincts can swing in a couple of generations, which
+              is what makes a fox boom or a fox bust legible as something the
+              pack *decided* rather than something that happened to it. */}
+          {hasFoxInstinctTrend ? (
+            <div className="flex flex-col gap-2 border-t border-neutral-800 pt-2">
+              <h3 className="text-[10px] font-semibold tracking-wide text-red-400/80 uppercase">Fox instincts</h3>
+              {FOX_TRAIT_META.filter((m) => FOX_INSTINCT_KEYS.includes(m.key)).map((m) => (
+                <TrendRow key={m.key} label={m.label} history={history} valueOf={(s) => s.foxTraits?.[m.key] ?? null} color={m.color} />
               ))}
             </div>
           ) : null}

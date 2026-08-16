@@ -20,7 +20,7 @@ const SPAWN_SPECIES = [
     key: 'fox',
     label: 'Fox',
     emoji: '🦊',
-    blurb: 'Predator. Hunts rabbits on heritable genes: speed, vision, camouflage, metabolism, bloodlust, pack tendency.',
+    blurb: 'Predator. A heritable body (speed, vision, camouflage, metabolism…) driven by a heritable neural-net brain.',
     accent: 'orange',
   },
 ]
