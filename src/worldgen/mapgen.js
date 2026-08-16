@@ -341,33 +341,78 @@ function tileColor(map, idx) {
 
 function drawForestTile(ctx, map, idx, sx, sy, tilePx, count) {
   const baseS = map.scaleVar[idx]
-  const spread = count > 1 ? 0.74 : 1
+  // Fewer, larger trees per tile than a flat per-tree scale would give -
+  // dense overlapping canopies were the main source of the "cluttered flat
+  // blobs" look, so trade count for per-tree detail instead.
+  const spread = count > 1 ? 0.68 : 1
   for (let k = 0; k < count; k++) {
     const jx = k === 0 ? map.jitterX[idx] : hash01(idx, k * 7 + 1)
     const jy = k === 0 ? map.jitterY[idx] : hash01(idx, k * 7 + 2)
     const s = (k === 0 ? baseS : 0.55 + hash01(idx, k * 7 + 3) * 0.55) * spread
     const cx = sx + jx * tilePx
     const cy = sy + jy * tilePx
-    const canopyR = Math.max(1, tilePx * 0.46 * s)
-    if (tilePx >= 5) {
-      ctx.fillStyle = 'rgb(74,54,36)'
-      ctx.fillRect(cx - Math.max(0.6, tilePx * 0.05), cy, Math.max(1.2, tilePx * 0.1), canopyR * 0.6)
-    }
+    const canopyR = Math.max(1, tilePx * 0.4 * s)
     const shade = hash01(idx, k * 7 + 4)
+
+    // Ground shadow, for a little grounding/volume instead of a flat
+    // sprite sitting directly on the tile fill.
+    if (tilePx >= 6) {
+      ctx.beginPath()
+      ctx.fillStyle = 'rgba(10,20,10,0.25)'
+      ctx.ellipse(cx + canopyR * 0.12, cy + canopyR * 0.9, canopyR * 0.75, canopyR * 0.28, 0, 0, Math.PI * 2)
+      ctx.fill()
+    }
+
+    // Canopy: a shadowed underside plus an offset lit crown (two solid
+    // tones instead of one flat circle) so each tree reads as a rounded
+    // form rather than merging into a flat green mass with its neighbors.
+    const canopyCx = cx
+    const canopyCy = cy + canopyR * 0.12
     ctx.beginPath()
-    ctx.fillStyle = rgb(mix(32, 68, shade), mix(92, 138, shade), mix(40, 68, shade))
-    ctx.arc(cx, cy, canopyR, 0, Math.PI * 2)
+    ctx.fillStyle = rgb(mix(24, 54, shade), mix(78, 118, shade), mix(34, 58, shade))
+    ctx.arc(canopyCx, canopyCy, canopyR, 0, Math.PI * 2)
     ctx.fill()
     if (tilePx >= 7) {
       ctx.lineWidth = Math.max(0.5, tilePx * 0.03)
-      ctx.strokeStyle = 'rgba(18,36,20,0.45)'
+      ctx.strokeStyle = 'rgba(16,32,18,0.4)'
       ctx.stroke()
     }
+    ctx.beginPath()
+    ctx.fillStyle = rgb(mix(46, 86, shade), mix(112, 158, shade), mix(52, 82, shade))
+    ctx.arc(cx - canopyR * 0.22, cy - canopyR * 0.22, canopyR * 0.78, 0, Math.PI * 2)
+    ctx.fill()
     if (tilePx >= 10) {
       ctx.beginPath()
-      ctx.fillStyle = 'rgba(255,255,255,0.12)'
-      ctx.arc(cx - canopyR * 0.32, cy - canopyR * 0.32, canopyR * 0.4, 0, Math.PI * 2)
+      ctx.fillStyle = 'rgba(255,244,200,0.18)'
+      ctx.arc(cx - canopyR * 0.4, cy - canopyR * 0.42, canopyR * 0.32, 0, Math.PI * 2)
       ctx.fill()
+    }
+
+    // Trunk, drawn last so it actually pokes out beneath the canopy -
+    // previously it was drawn (and hidden) underneath the canopy fill,
+    // which is why trees had no visible trunk at all.
+    if (tilePx >= 5) {
+      const trunkW = Math.max(1, tilePx * 0.12 * s)
+      const trunkTop = cy + canopyR * 0.55
+      const trunkBot = cy + canopyR * 1.15
+      ctx.beginPath()
+      ctx.moveTo(cx - trunkW * 0.5, trunkTop)
+      ctx.lineTo(cx + trunkW * 0.5, trunkTop)
+      ctx.lineTo(cx + trunkW * 0.3, trunkBot)
+      ctx.lineTo(cx - trunkW * 0.3, trunkBot)
+      ctx.closePath()
+      ctx.fillStyle = 'rgb(68,50,32)'
+      ctx.fill()
+      if (tilePx >= 9) {
+        ctx.fillStyle = 'rgba(255,224,180,0.18)'
+        ctx.beginPath()
+        ctx.moveTo(cx - trunkW * 0.12, trunkTop)
+        ctx.lineTo(cx, trunkTop)
+        ctx.lineTo(cx - trunkW * 0.05, trunkBot)
+        ctx.lineTo(cx - trunkW * 0.16, trunkBot)
+        ctx.closePath()
+        ctx.fill()
+      }
     }
   }
 }
@@ -757,7 +802,9 @@ export function drawMap(ctx, map, tilePx, viewport, time = 0) {
 
   // Third pass: vegetation and beach texture on top so canopies can
   // overlap tile edges.
-  const treeCount = tilePx >= 20 ? 3 : tilePx >= 10 ? 2 : 1
+  // Capped at 2/tile (was 3) - fewer, more detailed trees read as an actual
+  // forest instead of a wall of overlapping flat canopies.
+  const treeCount = tilePx >= 14 ? 2 : 1
   const shrubCount = tilePx >= 14 ? 2 : 1
   for (let y = startY; y <= endY; y++) {
     for (let x = startX; x <= endX; x++) {
