@@ -1,34 +1,41 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { drawMap } from './mapgen.js'
-import { createSimulation, isPlaceable, spawnRabbit, stepSimulation } from '../sim/simulation.js'
+import { createSimulation, isPlaceable, selectCreature, spawnFox, spawnRabbit, stepSimulation } from '../sim/simulation.js'
 import { drawSimulation } from '../sim/render.js'
 import { computeTraits, describeEnergyEffects, describeTraits } from '../sim/brainInsight.js'
 import RabbitInsights from './RabbitInsights.jsx'
+import FoxInsights from './FoxInsights.jsx'
 import PopulationPanel from './PopulationPanel.jsx'
+import SpawnPalette from './SpawnPalette.jsx'
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v))
 
-/** Snapshot the sim into plain data for the "Brains" panel: the selected
- * rabbit's traits/blurb (if any) plus the population trend history. */
+function generationRangeOf(creatures) {
+  if (!creatures.length) return null
+  let minGen = Infinity
+  let maxGen = -Infinity
+  for (const c of creatures) {
+    if (c.generation < minGen) minGen = c.generation
+    if (c.generation > maxGen) maxGen = c.generation
+  }
+  return [minGen, maxGen]
+}
+
+/** Snapshot the sim into plain data for the inspector/population panels: the
+ * selected creature (rabbit *or* fox) plus both populations' trend history.
+ * Plain data rather than live entity refs, so React re-renders off a stable
+ * value instead of an object the sim loop keeps mutating underneath it. */
 function buildInsightsData(sim) {
   const rabbits = sim.rabbits
-  let generationRange = null
-  if (rabbits.length) {
-    let minGen = Infinity
-    let maxGen = -Infinity
-    for (const r of rabbits) {
-      if (r.generation < minGen) minGen = r.generation
-      if (r.generation > maxGen) maxGen = r.generation
-    }
-    generationRange = [minGen, maxGen]
-  }
+  const foxes = sim.foxes
 
   let selected = null
-  if (sim.selectedId != null) {
+  if (sim.selectedId != null && sim.selectedKind === 'rabbit') {
     const rabbit = rabbits.find((r) => r.id === sim.selectedId)
     if (rabbit) {
       const traits = computeTraits(rabbit.brain)
       selected = {
+        kind: 'rabbit',
         id: rabbit.id,
         generation: rabbit.generation,
         energy: rabbit.energy,
@@ -36,6 +43,7 @@ function buildInsightsData(sim) {
         running: rabbit.running,
         resting: rabbit.resting,
         searching: rabbit.searching,
+        fleeing: rabbit.fleeing,
         gestating: rabbit.gestating,
         brain: rabbit.brain,
         traits,
@@ -43,9 +51,73 @@ function buildInsightsData(sim) {
         energyEffects: describeEnergyEffects(traits),
       }
     }
+  } else if (sim.selectedId != null && sim.selectedKind === 'fox') {
+    const fox = foxes.find((f) => f.id === sim.selectedId)
+    if (fox) {
+      selected = {
+        kind: 'fox',
+        id: fox.id,
+        generation: fox.generation,
+        energy: fox.energy,
+        alive: fox.alive,
+        genes: fox.genes,
+        hunting: fox.hunting,
+        sprinting: fox.sprinting,
+        packing: fox.packing,
+        feeding: fox.feedingRemaining > 0,
+        gestating: fox.gestating,
+        kills: fox.kills,
+      }
+    }
   }
 
-  return { selected, history: sim.traitHistory, population: rabbits.length, generationRange }
+  return {
+    selected,
+    history: sim.traitHistory,
+    population: rabbits.length,
+    foxPopulation: foxes.length,
+    kills: sim.kills,
+    generationRange: generationRangeOf(rabbits),
+    foxGenerationRange: generationRangeOf(foxes),
+  }
+}
+
+const SPAWN_SEARCH_RADIUS = 6
+
+/** Up to `count` placeable tiles, ring by ring outward from (tx, ty) - so a
+ * x10 drop lands as a little colony rather than ten creatures stacked on one
+ * square. Falls short (or returns nothing) if the area really is all water. */
+function placeableTilesNear(map, tx, ty, count) {
+  const tiles = []
+  for (let radius = 0; radius <= SPAWN_SEARCH_RADIUS && tiles.length < count; radius++) {
+    for (let dy = -radius; dy <= radius && tiles.length < count; dy++) {
+      for (let dx = -radius; dx <= radius && tiles.length < count; dx++) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== radius) continue
+        if (isPlaceable(map, tx + dx, ty + dy)) tiles.push([tx + dx, ty + dy])
+      }
+    }
+  }
+  return tiles
+}
+
+/** Random placeable tiles anywhere on the island, for the palette's scatter
+ * button. Rejection sampling with a bounded attempt count, since the ratio of
+ * land to ocean varies wildly between generated maps. */
+function scatterTiles(map, count) {
+  const tiles = []
+  for (let attempts = 0; attempts < count * 200 && tiles.length < count; attempts++) {
+    const x = Math.floor(Math.random() * map.size)
+    const y = Math.floor(Math.random() * map.size)
+    if (isPlaceable(map, x, y)) tiles.push([x, y])
+  }
+  return tiles
+}
+
+function spawnAt(sim, species, tiles) {
+  for (const [x, y] of tiles) {
+    if (species === 'fox') spawnFox(sim, x, y)
+    else spawnRabbit(sim, x, y)
+  }
 }
 
 // If the viewport (in tile units) is wider/taller than the map, center the
@@ -68,10 +140,13 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
   // React) so the render loop can step it without triggering re-renders.
   // Recreated whenever a new map is generated.
   const simRef = useRef(null)
-  const placingRef = useRef(false)
-  const [placing, setPlacing] = useState(false)
-  const [rabbitCount, setRabbitCount] = useState(0)
-  const lastReportedCountRef = useRef(0)
+  // Spawn palette state. The ref mirrors it because the canvas pointer
+  // handlers are bound once inside the render-loop effect and would
+  // otherwise close over a stale species/count.
+  const spawnRef = useRef({ open: false, species: 'rabbit', count: 1 })
+  const [spawn, setSpawn] = useState({ open: false, species: 'rabbit', count: 1 })
+  const [counts, setCounts] = useState({ rabbits: 0, foxes: 0, kills: 0 })
+  const lastReportedCountsRef = useRef({ rabbits: 0, foxes: 0, kills: 0 })
 
   // "Brains" and "Population" panels: translate the sim's raw state into
   // plain-language traits/trends (see sim/brainInsight.js). Both are
@@ -90,11 +165,25 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
 
   useEffect(() => {
     simRef.current = map ? createSimulation(map) : null
-    lastReportedCountRef.current = 0
-    setRabbitCount(0)
-    setPlacing(false)
-    placingRef.current = false
+    lastReportedCountsRef.current = { rabbits: 0, foxes: 0, kills: 0 }
+    setCounts({ rabbits: 0, foxes: 0, kills: 0 })
     setInsightsData(null)
+  }, [map])
+
+  const updateSpawn = useCallback((patch) => {
+    spawnRef.current = { ...spawnRef.current, ...patch }
+    setSpawn(spawnRef.current)
+  }, [])
+
+  const toggleSpawnPalette = useCallback(() => {
+    updateSpawn({ open: !spawnRef.current.open })
+  }, [updateSpawn])
+
+  const scatterSpawn = useCallback(() => {
+    const sim = simRef.current
+    if (!sim || !map) return
+    const { species, count } = spawnRef.current
+    spawnAt(sim, species, scatterTiles(map, count))
   }, [map])
 
   const toggleInsights = useCallback(() => {
@@ -124,11 +213,6 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
     },
     [map],
   )
-
-  const togglePlacing = useCallback(() => {
-    placingRef.current = !placingRef.current
-    setPlacing(placingRef.current)
-  }, [])
 
   const reportZoom = useCallback(() => {
     const v = viewRef.current
@@ -212,9 +296,10 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
       const sim = simRef.current
       if (sim) {
         stepSimulation(sim, dt)
-        if (sim.rabbits.length !== lastReportedCountRef.current) {
-          lastReportedCountRef.current = sim.rabbits.length
-          setRabbitCount(sim.rabbits.length)
+        const last = lastReportedCountsRef.current
+        if (sim.rabbits.length !== last.rabbits || sim.foxes.length !== last.foxes || sim.kills !== last.kills) {
+          lastReportedCountsRef.current = { rabbits: sim.rabbits.length, foxes: sim.foxes.length, kills: sim.kills }
+          setCounts(lastReportedCountsRef.current)
         }
         if ((showInsightsRef.current || showPopulationRef.current) && now - lastInsightsUpdateRef.current >= INSIGHTS_UPDATE_MS) {
           lastInsightsUpdateRef.current = now
@@ -280,24 +365,31 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
       const tileX = v.originX + mx / v.tilePx
       const tileY = v.originY + my / v.tilePx
 
-      if (placingRef.current) {
+      // With the spawn palette open the map is a placement surface; closed,
+      // clicks select a creature to inspect.
+      if (spawnRef.current.open) {
         const tx = Math.floor(tileX)
         const ty = Math.floor(tileY)
-        if (isPlaceable(map, tx, ty)) spawnRabbit(sim, tx, ty)
+        const { species, count } = spawnRef.current
+        spawnAt(sim, species, placeableTilesNear(map, tx, ty, count))
         return
       }
 
       let best = null
-      let bestDist = 0.6 // tiles - must click reasonably close to a rabbit to select it
-      for (const r of sim.rabbits) {
-        if (!r.alive) continue
-        const d = Math.hypot(r.x + 0.5 - tileX, r.y + 0.5 - tileY)
-        if (d < bestDist) {
-          bestDist = d
-          best = r
+      let bestKind = null
+      let bestDist = 0.7 // tiles - must click reasonably close to something to select it
+      for (const [kind, list] of [['rabbit', sim.rabbits], ['fox', sim.foxes]]) {
+        for (const c of list) {
+          if (!c.alive) continue
+          const d = Math.hypot(c.x + 0.5 - tileX, c.y + 0.5 - tileY)
+          if (d < bestDist) {
+            bestDist = d
+            best = c
+            bestKind = kind
+          }
         }
       }
-      sim.selectedId = best ? best.id : null
+      selectCreature(sim, bestKind, best ? best.id : null)
     }
     function onPointerUp(e) {
       const d = dragRef.current
@@ -388,14 +480,14 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
           {map ? (
             <button
               type="button"
-              onClick={togglePlacing}
+              onClick={toggleSpawnPalette}
               className={
-                placing
+                spawn.open
                   ? 'rounded-sm border border-emerald-500 bg-emerald-500/20 px-4 py-2 text-sm font-semibold text-emerald-400 transition'
                   : 'rounded-sm border border-neutral-700 bg-neutral-950 px-4 py-2 text-sm font-semibold transition hover:border-emerald-500 hover:text-emerald-400'
               }
             >
-              🐇 {placing ? 'Click a tile to place…' : 'Spawn rabbit'}
+              🐾 {spawn.open ? 'Click a tile to place…' : 'Spawn creatures'}
             </button>
           ) : null}
           {map ? (
@@ -408,7 +500,7 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
                   : 'rounded-sm border border-neutral-700 bg-neutral-950 px-4 py-2 text-sm font-semibold transition hover:border-emerald-500 hover:text-emerald-400'
               }
             >
-              🧠 Brains
+              🔍 Inspect
             </button>
           ) : null}
           {map ? (
@@ -428,7 +520,13 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
         {map ? (
           <div className="flex flex-wrap items-center gap-4 text-xs text-neutral-400">
             <span>
-              Rabbits <b className="font-mono text-neutral-100 tabular-nums">{rabbitCount}</b>
+              🐇 <b className="font-mono text-neutral-100 tabular-nums">{counts.rabbits}</b>
+            </span>
+            <span>
+              🦊 <b className="font-mono text-neutral-100 tabular-nums">{counts.foxes}</b>
+            </span>
+            <span>
+              Caught <b className="font-mono text-red-400 tabular-nums">{counts.kills}</b>
             </span>
             <span>
               Size <b className="font-mono text-neutral-100 tabular-nums">{map.size}×{map.size}</b>
@@ -471,23 +569,47 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
       <div ref={wrapRef} className="relative flex min-h-0 flex-1 items-center justify-center p-5">
         <canvas ref={canvasRef} className="touch-none rounded-sm bg-[#16324a] shadow-2xl shadow-black/40" />
         <p className="pointer-events-none absolute bottom-3 left-1/2 -translate-x-1/2 text-[11px] text-neutral-500">
-          {placing ? 'Click a tile to place a rabbit' : 'Scroll to zoom · Drag to pan · Click a rabbit to inspect it'}
+          {spawn.open
+            ? `Click a tile to place ${spawn.count} ${spawn.species}${spawn.count === 1 ? '' : spawn.species === 'fox' ? 'es' : 's'}`
+            : 'Scroll to zoom · Drag to pan · Click a creature to inspect it'}
         </p>
         {/* Overlaid on top of the map (not laid out beside it) so opening
             either panel never resizes or shifts the canvas underneath. */}
         {showPopulation ? (
           <div className="pointer-events-none absolute top-3 left-3 max-h-[calc(100%-1.5rem)]">
             <PopulationPanel
-              population={insightsData?.population ?? rabbitCount}
+              population={insightsData?.population ?? counts.rabbits}
+              foxPopulation={insightsData?.foxPopulation ?? counts.foxes}
+              kills={insightsData?.kills ?? counts.kills}
               history={insightsData?.history ?? []}
               generationRange={insightsData?.generationRange ?? null}
+              foxGenerationRange={insightsData?.foxGenerationRange ?? null}
               onClose={togglePopulation}
             />
           </div>
         ) : null}
+        {/* One inspector slot, whose contents follow whatever is selected -
+            a fox's genome and a rabbit's neural net need genuinely
+            different panels (see FoxInsights.jsx). */}
         {showInsights ? (
           <div className="pointer-events-none absolute top-3 right-3 max-h-[calc(100%-1.5rem)]">
-            <RabbitInsights selected={insightsData?.selected ?? null} onClose={toggleInsights} />
+            {insightsData?.selected?.kind === 'fox' ? (
+              <FoxInsights selected={insightsData.selected} onClose={toggleInsights} />
+            ) : (
+              <RabbitInsights selected={insightsData?.selected ?? null} onClose={toggleInsights} />
+            )}
+          </div>
+        ) : null}
+        {spawn.open ? (
+          <div className="pointer-events-none absolute bottom-10 left-3 max-h-[calc(100%-1.5rem)]">
+            <SpawnPalette
+              species={spawn.species}
+              count={spawn.count}
+              onSpeciesChange={(species) => updateSpawn({ species })}
+              onCountChange={(count) => updateSpawn({ count })}
+              onScatter={scatterSpawn}
+              onClose={toggleSpawnPalette}
+            />
           </div>
         ) : null}
       </div>

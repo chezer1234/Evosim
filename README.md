@@ -10,6 +10,9 @@ No install, no sign-up — it just opens and runs in your browser.
 
 - **A new island every time.** Every "Play" generates a fresh, seeded coastline — tune its size, terrain roughness, lake count, and vegetation from Settings.
 - **Rabbits** — the first species. Each one is steered by its own small "brain" that decides when to forage, rest, sprint, or reproduce. Energy drains over time, food restores it, and reproduction passes a mutated copy of a rabbit's brain to its offspring — so populations drift and adapt across generations, entirely from selection pressure rather than anything hand-scripted.
+- **Foxes** — the predator. Where a rabbit thinks with a neural net, a fox is a set of named, heritable dials: **speed, vision, camouflage, metabolism, desire to hunt, pack tendency, stamina and fecundity**. They stalk, sprint, pounce and feed; camouflaged ones get closer before the rabbits notice; pack-minded ones hunt together. Every gene costs energy to run, so a fox that's good at everything starves — click one to see its genome and what it works out to in practice.
+- **Rabbits can see them coming.** Their brains gained predator inputs and a `flee` output, so bolting early versus holding your nerve is something a lineage evolves, not something we scripted. A fox at point-blank range triggers panic regardless.
+- **Spawn palette** — pick a species, drop 1–10 per click, or scatter them across the island, then watch both populations rise and fall against each other in the Population panel.
 
 More species and interactions are on the way.
 

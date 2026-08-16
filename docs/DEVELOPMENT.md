@@ -14,10 +14,18 @@ src/
     *.jsx            Screens and UI that drive mapgen.js
   sim/            The evolution simulation, layered on top of a generated map
     brain.js         Tiny hand-rolled feedforward neural net (each rabbit's "genome")
-    simulation.js    Entity state, the per-tick decision loop, energy/lifecycle, reproduction
+    fox.js           The fox genome: named 0..1 genes, their mutation, and the sim
+                     units they map to (speed, vision, camouflage, metabolism, …)
+    simulation.js    Entity state, both species' per-tick decision loops, predation,
+                     energy/lifecycle, reproduction
     brainInsight.js  Derives human-readable trait summaries from a brain's raw weights
-    render.js        Draws rabbits onto the map canvas
+    render.js        Draws rabbits and foxes onto the map canvas
 ```
+
+The two species are deliberately modelled differently: a rabbit's behaviour is an
+opaque neural net that has to be *interpreted* (`brainInsight.js`), while a fox is an
+explicit gene vector you can read straight off the panel. See
+[`docs/plans/issue-11-predator-foxes.md`](plans/issue-11-predator-foxes.md) for why.
 
 `docs/plans/` holds the implementation plans written for each feature/issue, kept for context on *why* something works the way it does.
 
@@ -37,7 +45,7 @@ npm test          # run once (used by CI)
 npm run test:watch
 ```
 
-Tests live alongside the source they cover (`*.test.js`) and run on [Vitest](https://vitest.dev). They focus on the pure simulation logic — map-generation invariants, the brain's forward pass and mutation, and the rabbit lifecycle (movement bounds, eating, energy depletion/death, reproduction) — since that's the code with real behavior to get wrong. Rendering and React components aren't covered yet.
+Tests live alongside the source they cover (`*.test.js`) and run on [Vitest](https://vitest.dev). They focus on the pure simulation logic — map-generation invariants, the brain's forward pass and mutation, the fox genome (mutation bounds and every gene's mapping to sim units), the rabbit lifecycle (movement bounds, eating, energy depletion/death, reproduction), and predation (hunting, pouncing, fleeing, camouflage, pack behaviour) — since that's the code with real behavior to get wrong. Rendering and React components aren't covered yet.
 
 ## Linting
 

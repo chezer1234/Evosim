@@ -1,18 +1,22 @@
-// Small floating overlay showing the rabbit population trend over time.
-// Deliberately independent of the "Brains" panel (see RabbitInsights.jsx) -
-// you can watch the population without selecting/inspecting a rabbit, and
-// toggling this doesn't affect that panel or vice versa.
+// Small floating overlay showing both populations over time - rabbits and
+// the foxes eating them - plus how each species' genes are drifting.
+// Deliberately independent of the inspector panels (see RabbitInsights.jsx /
+// FoxInsights.jsx): you can watch the ecosystem without selecting anything,
+// and toggling this doesn't affect those panels or vice versa.
 
 import { TRAIT_META } from '../sim/brainInsight.js'
+import { FOX_GENE_META } from '../sim/fox.js'
 
-function Sparkline({ history, traitKey, color }) {
+/** A 0..1 trend line. `valueOf` pulls the number out of a sample so this
+ * works for both flat rabbit traits and the nested fox gene averages. */
+function Sparkline({ history, valueOf, color }) {
   if (history.length < 2) return null
   const w = 200
   const h = 30
   const points = history
     .map((s, i) => {
       const x = (i / (history.length - 1)) * w
-      const y = h - s[traitKey] * h
+      const y = h - (valueOf(s) ?? 0) * h
       return `${x.toFixed(1)},${y.toFixed(1)}`
     })
     .join(' ')
@@ -23,46 +27,71 @@ function Sparkline({ history, traitKey, color }) {
   )
 }
 
-const TREND_KEYS = ['foodDrive', 'searchDrive', 'boldness', 'broodiness']
-
-const POP_CHART_W = 220
-const POP_CHART_H = 40
-
-/** Population over time, scaled to its own running max (not 0..1 like the
- * trait sparklines) so a crash down to 0 is as visible as the peak. */
-function PopulationChart({ history }) {
-  if (history.length < 2) return null
-  const values = history.map((s) => s.population)
-  const max = Math.max(1, ...values)
-  const last = values[values.length - 1]
-  const points = history
-    .map((s, i) => {
-      const x = (i / (history.length - 1)) * POP_CHART_W
-      const y = POP_CHART_H - (s.population / max) * POP_CHART_H
-      return `${x.toFixed(1)},${y.toFixed(1)}`
-    })
-    .join(' ')
-  const fillPoints = `0,${POP_CHART_H} ${points} ${POP_CHART_W},${POP_CHART_H}`
+function TrendRow({ label, history, valueOf, color }) {
+  const latest = valueOf(history[history.length - 1])
   return (
     <div className="flex flex-col gap-1">
       <div className="flex items-center justify-between text-[11px] text-neutral-400">
-        <span>Population over time</span>
-        <span className="font-mono tabular-nums text-neutral-300">{last}</span>
+        <span>{label} (avg)</span>
+        <span className="font-mono tabular-nums">{latest == null ? '—' : `${Math.round(latest * 100)}%`}</span>
+      </div>
+      <Sparkline history={history} valueOf={valueOf} color={color} />
+    </div>
+  )
+}
+
+const TREND_KEYS = ['foodDrive', 'searchDrive', 'broodiness', 'skittishness']
+// The fox genes worth watching drift: the ones that decide whether the
+// rabbits get away.
+const FOX_TREND_KEYS = ['speed', 'vision', 'camouflage', 'bloodlust', 'packTendency']
+
+const POP_CHART_W = 220
+const POP_CHART_H = 46
+
+/** Both populations over time on one axis, scaled to their shared running
+ * max (not 0..1 like the trait sparklines) so a crash down to 0 is as
+ * visible as the peak - and so the classic predator/prey lag between the two
+ * curves is actually readable. */
+function PopulationChart({ history }) {
+  if (history.length < 2) return null
+  const max = Math.max(1, ...history.map((s) => Math.max(s.population, s.foxPopulation ?? 0)))
+  const seriesPoints = (key) =>
+    history
+      .map((s, i) => {
+        const x = (i / (history.length - 1)) * POP_CHART_W
+        const y = POP_CHART_H - ((s[key] ?? 0) / max) * POP_CHART_H
+        return `${x.toFixed(1)},${y.toFixed(1)}`
+      })
+      .join(' ')
+  const rabbitPoints = seriesPoints('population')
+  const foxPoints = seriesPoints('foxPopulation')
+  const latest = history[history.length - 1]
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center justify-between text-[11px] text-neutral-400">
+        <span>Populations over time</span>
+        <span className="font-mono tabular-nums">
+          <span className="text-emerald-400">{latest.population}</span>
+          <span className="text-neutral-600"> / </span>
+          <span className="text-orange-400">{latest.foxPopulation ?? 0}</span>
+        </span>
       </div>
       <svg viewBox={`0 0 ${POP_CHART_W} ${POP_CHART_H}`} width="100%" height={POP_CHART_H} preserveAspectRatio="none">
-        <polyline points={fillPoints} fill="rgba(120,214,110,0.15)" stroke="none" />
-        <polyline points={points} fill="none" stroke="rgb(120,214,110)" strokeWidth="1.5" />
+        <polyline points={`0,${POP_CHART_H} ${rabbitPoints} ${POP_CHART_W},${POP_CHART_H}`} fill="rgba(120,214,110,0.15)" stroke="none" />
+        <polyline points={rabbitPoints} fill="none" stroke="rgb(120,214,110)" strokeWidth="1.5" />
+        <polyline points={foxPoints} fill="none" stroke="rgb(251,146,60)" strokeWidth="1.5" />
       </svg>
       <div className="flex justify-between text-[9px] text-neutral-600">
-        <span>0</span>
+        <span>🐇 rabbits · 🦊 foxes</span>
         <span>peak {max}</span>
       </div>
     </div>
   )
 }
 
-export default function PopulationPanel({ population, history, generationRange, onClose }) {
+export default function PopulationPanel({ population, foxPopulation, kills, history, generationRange, foxGenerationRange, onClose }) {
   const latest = history[history.length - 1]
+  const hasFoxTrend = history.some((s) => s.foxGenes)
 
   return (
     <div className="pointer-events-auto flex w-64 flex-col gap-2 rounded-lg border border-neutral-800 bg-neutral-900/95 p-3 text-neutral-200 shadow-2xl shadow-black/40 backdrop-blur-sm">
@@ -73,25 +102,32 @@ export default function PopulationPanel({ population, history, generationRange, 
         </button>
       </div>
       <p className="text-xs text-neutral-400">
-        {population} rabbit{population === 1 ? '' : 's'} alive
+        🐇 {population} rabbit{population === 1 ? '' : 's'}
         {generationRange ? ` · gen ${generationRange[0]}–${generationRange[1]}` : ''}
+      </p>
+      <p className="text-xs text-neutral-400">
+        🦊 {foxPopulation} fox{foxPopulation === 1 ? '' : 'es'}
+        {foxGenerationRange ? ` · gen ${foxGenerationRange[0]}–${foxGenerationRange[1]}` : ''}
+        {kills ? ` · ${kills} caught` : ''}
       </p>
       {latest ? (
         <div className="flex flex-col gap-2 rounded-sm border border-neutral-800 bg-neutral-950 p-2">
           <PopulationChart history={history} />
           {TRAIT_META.filter((m) => TREND_KEYS.includes(m.key)).map((m) => (
-            <div key={m.key} className="flex flex-col gap-1">
-              <div className="flex items-center justify-between text-[11px] text-neutral-400">
-                <span>{m.label} (avg)</span>
-                <span className="font-mono tabular-nums">{Math.round(latest[m.key] * 100)}%</span>
-              </div>
-              <Sparkline history={history} traitKey={m.key} color={m.color} />
-            </div>
+            <TrendRow key={m.key} label={m.label} history={history} valueOf={(s) => s[m.key]} color={m.color} />
           ))}
           <p className="text-[10px] text-neutral-600">Averaged across every living rabbit, sampled every ~5s of sim time.</p>
+          {hasFoxTrend ? (
+            <div className="flex flex-col gap-2 border-t border-neutral-800 pt-2">
+              <h3 className="text-[10px] font-semibold tracking-wide text-orange-400/80 uppercase">Fox genes</h3>
+              {FOX_GENE_META.filter((m) => FOX_TREND_KEYS.includes(m.key)).map((m) => (
+                <TrendRow key={m.key} label={m.label} history={history} valueOf={(s) => s.foxGenes?.[m.key] ?? null} color={m.color} />
+              ))}
+            </div>
+          ) : null}
         </div>
       ) : (
-        <p className="text-[11px] text-neutral-600">A trend line appears once rabbits have been alive a little while.</p>
+        <p className="text-[11px] text-neutral-600">A trend line appears once creatures have been alive a little while.</p>
       )}
     </div>
   )

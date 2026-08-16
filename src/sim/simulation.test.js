@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { TILE } from '../worldgen/mapgen.js'
-import { createSimulation, spawnRabbit, stepSimulation, isPlaceable, TICK_MS } from './simulation.js'
+import { createSimulation, selectCreature, spawnFox, spawnRabbit, stepSimulation, isPlaceable, TICK_MS } from './simulation.js'
 import { INPUT_SIZE, HIDDEN_SIZE, OUTPUT_SIZE } from './brain.js'
+import { FOX_GENE_KEYS } from './fox.js'
 
 // A brain that ignores its inputs entirely (all weights/biases zero), so its
 // behaviour is fully predictable: moveX/moveY = tanh(0) = 0 (never moves),
@@ -21,6 +22,57 @@ function reproductiveBrain() {
   const brain = zeroBrain()
   brain.b2[4] = 10 // reproduceDesire logit, sigmoid(10) ~= 0.9999
   return brain
+}
+
+// A rabbit that never chooses to flee (flee logit -10, sigmoid ~= 0). It
+// still panics inside PANIC_RADIUS - that override is deliberately not
+// something a genome can switch off - so this makes a predictable, stationary
+// target for testing what the *fox* does.
+function fearlessBrain() {
+  const brain = zeroBrain()
+  brain.b2[6] = -10
+  return brain
+}
+
+// The opposite: bolts the instant it can see a fox at all, which is what
+// makes it a clean probe for whether a fox was detected in the first place.
+function jumpyBrain() {
+  const brain = zeroBrain()
+  brain.b2[6] = 10
+  return brain
+}
+
+/** Fox genes with everything neutral except the overrides. */
+function foxGenes(overrides = {}) {
+  const g = {}
+  for (const key of FOX_GENE_KEYS) g[key] = 0.5
+  return { ...g, ...overrides }
+}
+
+// A fox built to actually hunt in tests: always hungry for a chase
+// (bloodlust 1), fast enough to close, and easy to see so nothing depends on
+// camouflage unless a test says so.
+function hunterGenes(overrides = {}) {
+  return foxGenes({ speed: 1, vision: 1, camouflage: 0, bloodlust: 1, stamina: 1, ...overrides })
+}
+
+/** An open square of GRASS ringed by OCEAN, no apples - a plain arena for
+ * predator/prey tests where nothing distracts either species with food. */
+function makeOpenMap(size) {
+  const tileType = new Uint8Array(size * size).fill(TILE.GRASS)
+  for (let i = 0; i < size; i++) {
+    tileType[i] = TILE.OCEAN
+    tileType[(size - 1) * size + i] = TILE.OCEAN
+    tileType[i * size] = TILE.OCEAN
+    tileType[i * size + size - 1] = TILE.OCEAN
+  }
+  return { size, tileType, canHaveApple: new Uint8Array(size * size) }
+}
+
+/** Run `ms` of sim time in decision-tick slices, so behaviour resolves tick
+ * by tick the way it does in the real render loop. */
+function runFor(sim, ms) {
+  for (let elapsed = 0; elapsed < ms; elapsed += TICK_MS) stepSimulation(sim, TICK_MS)
 }
 
 // Tiny hand-built map: an interior 5x5 patch of GRASS ringed by OCEAN, with
@@ -203,5 +255,214 @@ describe('stepSimulation: reproduction', () => {
 
     const child = sim.rabbits.find((r) => r.generation === 1)
     expect(child.energy).toBe(80)
+  })
+})
+
+describe('spawnFox', () => {
+  it('adds a live fox with a full gene set and its own id sequence', () => {
+    const sim = createSimulation(makeOpenMap(9))
+    const fox = spawnFox(sim, 3, 3)
+    expect(sim.foxes).toContain(fox)
+    expect(sim.rabbits).toEqual([])
+    expect(fox.alive).toBe(true)
+    expect(fox.kills).toBe(0)
+    expect(Object.keys(fox.genes).sort()).toEqual([...FOX_GENE_KEYS].sort())
+  })
+})
+
+describe('foxes hunting rabbits', () => {
+  it('runs down a rabbit that does not flee, and eats it', () => {
+    const sim = createSimulation(makeOpenMap(11))
+    spawnRabbit(sim, 7, 5, fearlessBrain(), 100)
+    const fox = spawnFox(sim, 3, 5, hunterGenes(), 60)
+    const energyBefore = fox.energy
+
+    // Step until the kill rather than for a fixed span, so the assertions
+    // below describe the moment it happens instead of some point after it.
+    for (let tick = 0; tick < 20 && sim.kills === 0; tick++) stepSimulation(sim, TICK_MS)
+
+    expect(sim.rabbits).toHaveLength(0)
+    expect(sim.kills).toBe(1)
+    expect(fox.kills).toBe(1)
+    expect(fox.energy).toBeGreaterThan(energyBefore)
+    expect(fox.feedingRemaining).toBeGreaterThan(0) // stands over the carcass
+  })
+
+  it('leaves rabbits alone when it is well fed and has no desire to hunt', () => {
+    const sim = createSimulation(makeOpenMap(11))
+    spawnRabbit(sim, 6, 5, fearlessBrain(), 100)
+    // bloodlust 0 -> only hunts below ~46 energy; this one starts far above it.
+    const fox = spawnFox(sim, 4, 5, hunterGenes({ bloodlust: 0 }), 110)
+
+    runFor(sim, 4000)
+
+    expect(sim.rabbits).toHaveLength(1)
+    expect(sim.kills).toBe(0)
+    expect(fox.hunting).toBe(false)
+  })
+
+  it('cannot pounce on a rabbit it has not closed on yet', () => {
+    const sim = createSimulation(makeOpenMap(21))
+    spawnRabbit(sim, 16, 10, fearlessBrain(), 100)
+    spawnFox(sim, 2, 10, hunterGenes(), 60)
+
+    stepSimulation(sim, TICK_MS)
+
+    expect(sim.rabbits).toHaveLength(1)
+    expect(sim.kills).toBe(0)
+  })
+
+  it('clears the selection when the selected rabbit is eaten', () => {
+    const sim = createSimulation(makeOpenMap(11))
+    const rabbit = spawnRabbit(sim, 6, 5, fearlessBrain(), 100)
+    spawnFox(sim, 4, 5, hunterGenes(), 60)
+    selectCreature(sim, 'rabbit', rabbit.id)
+
+    runFor(sim, 3000)
+
+    expect(sim.kills).toBe(1)
+    expect(sim.selectedId).toBeNull()
+    expect(sim.selectedKind).toBeNull()
+  })
+})
+
+describe('rabbits fleeing foxes', () => {
+  it('bolts away from a fox at point-blank range whatever its genome says', () => {
+    const sim = createSimulation(makeOpenMap(15))
+    // Fearless genome, but PANIC_RADIUS is a hardwired reflex.
+    const rabbit = spawnRabbit(sim, 8, 7, fearlessBrain(), 100)
+    spawnFox(sim, 7, 7, hunterGenes({ speed: 0 }), 60)
+
+    stepSimulation(sim, TICK_MS)
+
+    expect(rabbit.fleeing).toBe(true)
+    expect(rabbit.running).toBe(true) // a bolt is always a sprint
+    expect(rabbit.resting).toBe(false)
+    expect(rabbit.x).toBeGreaterThan(8) // directly away from the fox
+  })
+
+  it('does not flee when there is no fox in sight', () => {
+    const sim = createSimulation(makeOpenMap(11))
+    const rabbit = spawnRabbit(sim, 5, 5, jumpyBrain(), 100)
+    stepSimulation(sim, TICK_MS)
+    expect(rabbit.fleeing).toBe(false)
+  })
+
+  it('spots an uncamouflaged fox at a distance, but not a camouflaged one', () => {
+    const seen = createSimulation(makeOpenMap(15))
+    const watchful = spawnRabbit(seen, 10, 7, jumpyBrain(), 100)
+    spawnFox(seen, 5, 7, hunterGenes({ camouflage: 0, speed: 0 }), 60)
+    stepSimulation(seen, TICK_MS)
+    expect(watchful.fleeing).toBe(true)
+
+    const ambushed = createSimulation(makeOpenMap(15))
+    const oblivious = spawnRabbit(ambushed, 10, 7, jumpyBrain(), 100)
+    spawnFox(ambushed, 5, 7, hunterGenes({ camouflage: 1, speed: 0 }), 60)
+    stepSimulation(ambushed, TICK_MS)
+    expect(oblivious.fleeing).toBe(false)
+  })
+
+  it('outruns a slow fox once it has bolted, opening the gap', () => {
+    const sim = createSimulation(makeOpenMap(31))
+    const rabbit = spawnRabbit(sim, 14, 15, jumpyBrain(), 100)
+    const fox = spawnFox(sim, 10, 15, hunterGenes({ speed: 0 }), 60)
+    const gapBefore = Math.hypot(rabbit.x - fox.x, rabbit.y - fox.y)
+
+    runFor(sim, 2000)
+
+    expect(sim.kills).toBe(0)
+    expect(Math.hypot(rabbit.x - fox.x, rabbit.y - fox.y)).toBeGreaterThan(gapBefore)
+  })
+})
+
+describe('fox pack behaviour', () => {
+  it('flags foxes as packing only when a packmate is inside their pack radius', () => {
+    const sim = createSimulation(makeOpenMap(31))
+    const loner = spawnFox(sim, 3, 3, foxGenes({ packTendency: 0, speed: 0 }), 90)
+    const packerA = spawnFox(sim, 20, 20, foxGenes({ packTendency: 1, speed: 0 }), 90)
+    const packerB = spawnFox(sim, 27, 24, foxGenes({ packTendency: 1, speed: 0 }), 90)
+
+    stepSimulation(sim, TICK_MS)
+
+    expect(loner.packing).toBe(false)
+    expect(packerA.packing).toBe(true)
+    expect(packerB.packing).toBe(true)
+  })
+
+  it('draws pack-minded foxes toward each other while they are not hunting', () => {
+    const sim = createSimulation(makeOpenMap(31))
+    const a = spawnFox(sim, 8, 15, foxGenes({ packTendency: 1, speed: 1, bloodlust: 0 }), 90)
+    const b = spawnFox(sim, 22, 15, foxGenes({ packTendency: 1, speed: 1, bloodlust: 0 }), 90)
+    const gapBefore = Math.hypot(a.x - b.x, a.y - b.y)
+
+    runFor(sim, 4000)
+
+    expect(Math.hypot(a.x - b.x, a.y - b.y)).toBeLessThan(gapBefore)
+  })
+})
+
+describe('fox energy and reproduction', () => {
+  it('burns energy over time and dies once it runs out', () => {
+    const sim = createSimulation(makeOpenMap(9))
+    spawnFox(sim, 4, 4, foxGenes(), 1)
+    expect(sim.foxes).toHaveLength(1)
+
+    runFor(sim, 5000)
+
+    expect(sim.foxes).toHaveLength(0)
+  })
+
+  it('burns energy faster while sprinting after prey than while prowling', () => {
+    const chasing = createSimulation(makeOpenMap(21))
+    spawnRabbit(chasing, 14, 10, fearlessBrain(), 100)
+    const hunter = spawnFox(chasing, 6, 10, hunterGenes(), 100)
+
+    const idling = createSimulation(makeOpenMap(21))
+    const prowler = spawnFox(idling, 6, 10, hunterGenes(), 100)
+
+    runFor(chasing, 1000)
+    runFor(idling, 1000)
+
+    expect(hunter.energy).toBeLessThan(prowler.energy)
+  })
+
+  it('gestates once it is well fed and produces a cub with mutated genes', () => {
+    const sim = createSimulation(makeOpenMap(11))
+    // fecundity 1 -> breeds at the lowest energy threshold and the shortest
+    // gestation, so the test doesn't have to run for a simulated minute.
+    const fox = spawnFox(sim, 5, 5, foxGenes({ fecundity: 1, metabolism: 0 }), 120)
+
+    stepSimulation(sim, TICK_MS)
+    expect(fox.gestating).toBe(true)
+
+    runFor(sim, 34000)
+
+    const cub = sim.foxes.find((f) => f.generation === 1)
+    expect(cub).toBeDefined()
+    expect(Math.abs(cub.x - fox.x)).toBeLessThanOrEqual(2)
+    expect(Object.keys(cub.genes).sort()).toEqual([...FOX_GENE_KEYS].sort())
+  })
+})
+
+describe('trait history with both species', () => {
+  it('records fox population and average genes alongside the rabbit traits', () => {
+    const sim = createSimulation(makeOpenMap(15))
+    spawnRabbit(sim, 4, 4, fearlessBrain(), 100)
+    spawnFox(sim, 11, 11, foxGenes({ speed: 0.25, bloodlust: 0 }), 100)
+
+    runFor(sim, 5200)
+
+    const sample = sim.traitHistory[sim.traitHistory.length - 1]
+    expect(sample.population).toBe(1)
+    expect(sample.foxPopulation).toBe(1)
+    expect(sample.foxGenes.speed).toBeCloseTo(0.25, 5)
+    expect(sample.skittishness).toBeGreaterThanOrEqual(0)
+  })
+
+  it('leaves fox gene averages null when no foxes are alive', () => {
+    const sim = createSimulation(makeOpenMap(9))
+    spawnRabbit(sim, 4, 4, zeroBrain(), 100)
+    runFor(sim, 5200)
+    expect(sim.traitHistory[sim.traitHistory.length - 1].foxGenes).toBeNull()
   })
 })
