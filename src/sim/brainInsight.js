@@ -11,12 +11,12 @@
 import { HIDDEN_SIZE, INPUT_SIZE, OUTPUT_SIZE } from './brain.js'
 
 export const INPUT_LABELS = ['Baseline', 'Energy level', 'Food direction (x)', 'Food direction (y)', 'Food distance', 'In water', 'Randomness']
-export const OUTPUT_LABELS = ['Move X', 'Move Y', 'Run', 'Rest', 'Want to breed']
+export const OUTPUT_LABELS = ['Move X', 'Move Y', 'Run', 'Rest', 'Want to breed', 'Search drive']
 
 // Input/output indices, kept in sync with simulation.js's `inputs` array and
 // brain.js's think() output shape.
 const IN = { BIAS: 0, ENERGY: 1, FOOD_X: 2, FOOD_Y: 3, FOOD_DIST: 4, WATER: 5, NOISE: 6 }
-const OUT = { MOVE_X: 0, MOVE_Y: 1, RUN: 2, REST: 3, BREED: 4 }
+const OUT = { MOVE_X: 0, MOVE_Y: 1, RUN: 2, REST: 3, BREED: 4, SEARCH: 5 }
 
 /** pathways[input][output] = signed net pull of that input on that output,
  * summed across the hidden layer. */
@@ -49,9 +49,10 @@ export const TRAIT_META = [
   { key: 'boldness', label: 'Boldness (runs)', color: 'rgb(250,204,21)' },
   { key: 'restfulness', label: 'Restfulness', color: 'rgb(96,165,250)' },
   { key: 'broodiness', label: 'Broodiness', color: 'rgb(244,114,182)' },
+  { key: 'searchDrive', label: 'Search drive', color: 'rgb(56,189,248)' },
 ]
 
-/** Five 0..1 traits summarizing a genome's tendencies, independent of any
+/** Six 0..1 traits summarizing a genome's tendencies, independent of any
  * specific moment/situation. */
 export function computeTraits(brain) {
   const p = computePathways(brain)
@@ -63,6 +64,10 @@ export function computeTraits(brain) {
     boldness: squash(p[IN.BIAS][OUT.RUN]),
     restfulness: squash(p[IN.BIAS][OUT.REST]),
     broodiness: squash(p[IN.BIAS][OUT.BREED]),
+    // How eager this genome is, on average, to actively search when it
+    // can't see food - see SEARCH_DRIVE_INITIAL_BIAS in brain.js and its use
+    // in simulation.js's runDecisionTick.
+    searchDrive: squash(p[IN.BIAS][OUT.SEARCH]),
     _pathways: p,
   }
 }
@@ -79,8 +84,9 @@ export function describeTraits(t) {
     t.boldness > 0.5 ? 'runs boldly' : 'rarely sprints',
     t.restfulness > 0.5 ? 'rests often' : 'rarely rests',
     t.broodiness > 0.5 ? 'eager to breed' : 'reluctant to breed',
+    t.searchDrive > 0.5 ? 'searches actively when food is out of sight' : 'tends to sit tight when food is out of sight',
   ]
-  return `This rabbit has ${parts[0]}, a ${parts[1]}, ${parts[2]}, ${parts[3]}, and is ${parts[4]}.`
+  return `This rabbit has ${parts[0]}, a ${parts[1]}, ${parts[2]}, ${parts[3]}, and is ${parts[4]}. It also ${parts[5]}.`
 }
 
 /** Short "why it acts this way" notes for run/rest/breed, based on how each

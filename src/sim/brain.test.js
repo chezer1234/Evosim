@@ -23,9 +23,9 @@ describe('think', () => {
   const brain = createBrain(mulberry32(7))
   const neutralInputs = [1, 0.5, 0, 0, 1, 0, 0]
 
-  it('returns all five expected outputs', () => {
+  it('returns all six expected outputs', () => {
     const out = think(brain, neutralInputs)
-    expect(Object.keys(out).sort()).toEqual(['moveX', 'moveY', 'reproduceDesire', 'rest', 'run'].sort())
+    expect(Object.keys(out).sort()).toEqual(['moveX', 'moveY', 'reproduceDesire', 'rest', 'run', 'searchDrive'].sort())
   })
 
   it('keeps outputs within their activation ranges', () => {
@@ -34,7 +34,7 @@ describe('think', () => {
     expect(out.moveX).toBeLessThanOrEqual(1)
     expect(out.moveY).toBeGreaterThanOrEqual(-1)
     expect(out.moveY).toBeLessThanOrEqual(1)
-    for (const key of ['run', 'rest', 'reproduceDesire']) {
+    for (const key of ['run', 'rest', 'reproduceDesire', 'searchDrive']) {
       expect(out[key]).toBeGreaterThanOrEqual(0)
       expect(out[key]).toBeLessThanOrEqual(1)
     }

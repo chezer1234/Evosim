@@ -51,6 +51,74 @@ Since rabbits think via an opaque NN genome, added a side panel (`src/sim/brainI
 - **Population-wide**: generation range of the living population, plus a sparkline trend of average Food drive / Boldness / Broodiness sampled every ~5s of sim time - this is the "how have they changed" view, since individual genomes drift via mutation across generations.
 - Caveat noted in the code: the "pathway" numbers are a cheap sum-of-weighted-paths approximation, not a true saliency/gradient measure - good enough to describe tendencies, not a precise behavior predictor.
 
+## Addendum: search mode (population-collapse fix)
+
+Playtesting turned up a failure mode not covered by the original plan: with
+no apple in vision, a rabbit's brain only ever sees a constant food signal
+(dx=0, dy=0, dist=1), so its evolved `moveX/moveY` collapses into either a
+fixed bearing ("b-lining" off in one direction regardless of what's actually
+out there) or near-paralysis if `rest` dominates - not real foraging.
+Combined with `rest` costing nothing extra over walking (same energy-
+depletion rate), this let rabbits camp indefinitely near a just-eaten,
+regrowing tree instead of looking elsewhere, and colonies would grow past
+what the local apple supply could sustain, then collapse to zero all at
+once rather than gradually.
+
+Fix, in `src/sim/simulation.js` and `src/sim/brain.js`:
+
+- **A sixth evolvable output, `searchDrive`** (sigmoid): how eager a genome
+  is, on average, to actively search when it can't see food. Fresh brains
+  start biased toward "yes" (`SEARCH_DRIVE_INITIAL_BIAS`) since real rabbits
+  spend most of their time foraging, not sitting still - but it's still a
+  real per-weight-mutated trait, so it can evolve in either direction under
+  selection pressure.
+- **An explicit search heading** replaces the brain's raw move outputs
+  whenever blind to food and searching is active: held for
+  `SEARCH_HEADING_TICKS` decision ticks, then re-randomized - a genuine
+  sweep of the surroundings instead of a frozen genome artifact.
+- **Hunger hard-overrides everything, whether or not food is visible.**
+  Below `HUNGRY_ENERGY`, `resting` is forced off unconditionally - the first
+  version of this fix only cleared it while also blind, which still let a
+  starving rabbit sit through a "rest" decision with an apple in plain
+  sight, since `resting` fully suppresses movement and a weak/unlucky
+  `foodDrive` pathway never got a chance to fire. When hungry with an apple
+  visible, movement is now steered directly at it (bypassing the brain's own
+  move outputs the same way search mode bypasses them when blind); when
+  hungry and blind, it's the search sweep. Either way, a starving rabbit
+  always does *something* toward finding food, regardless of genome luck -
+  the actual fix for "near-instant population collapse," since it doesn't
+  depend on evolution having gotten there yet.
+- **`HUNGRY_ENERGY` raised from 40 to 65** (well above "critical"). A trace
+  of individual deaths showed the override working exactly as coded - 0
+  ticks spent resting while hungry, right up to death - but rabbits were
+  still starving anyway: at 40, a rabbit often didn't have enough travel
+  budget left to actually *reach* food once it started looking, especially
+  searching blind. Since resting has no upside to give up, there's no cost
+  to triggering real foraging much earlier - it just turns more of the
+  energy bar into usable search-and-reach time instead of a countdown that
+  quietly ran out while the rabbit was still "fine".
+- **Running is suppressed during blind search.** Running covers ground 2x
+  as fast but costs energy 2.5x as fast, so per tile it's *less*
+  energy-efficient than walking - net negative exactly when energy is the
+  limiting resource. That trade can still make sense chasing a specific
+  visible apple (the brain's `run` output still applies there, e.g. racing
+  another rabbit to it), but during an aimless blind sweep it just burns
+  through the search budget faster without covering the area any more
+  thoroughly.
+
+Surfaced in the UI too: rabbits mid-search render in a distinct color
+(`src/sim/render.js`), the selected-rabbit status line and trait panel show
+it (`RabbitInsights.jsx`), and it's tracked in the population trend charts
+alongside food drive/boldness/broodiness.
+
+Note: this fixes the *behavioral* bug (rabbits failing to even try). It
+doesn't address the separate, still-present boom-then-crash population
+dynamic - a colony that overshoots what the local, slowly-regrowing apple
+supply can sustain will still crash back down hard once it does, same as
+many real herbivore-vs-food-supply models. That's a carrying-capacity/
+balance question (reproduction rate, regrow rate, dispersal on crowding),
+not a "the rabbits aren't trying" bug, and needs its own pass.
+
 ## Open items to confirm as we go (non-blocking, using sensible defaults for now)
 
 - Exact apple regrow delay (defaulting to ~45s, easy to retune).
