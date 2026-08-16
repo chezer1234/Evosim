@@ -27,7 +27,7 @@ describe('createFoxGenes', () => {
   it('keeps founders near their founder mean rather than at the extremes', () => {
     // Otherwise the first fox you place decides the simulation by spawn luck
     // instead of by selection (see FOUNDER_SPREAD).
-    const mean = { speed: 0.34, metabolism: 0.54, fecundity: 0.28 }
+    const mean = { speed: 0.34, metabolism: 0.54, fecundity: 0.28, swimming: 0.22 }
     for (let seed = 0; seed < 25; seed++) {
       for (const [key, value] of Object.entries(createFoxGenes(mulberry32(seed)))) {
         expect(Math.abs(value - (mean[key] ?? 0.5))).toBeLessThanOrEqual(0.34)
@@ -215,7 +215,7 @@ describe('describeFox', () => {
 
   it('summarizes the numbers a player would otherwise have to work out', () => {
     const notes = describeFoxStats(genes())
-    expect(notes).toHaveLength(4)
+    expect(notes).toHaveLength(5)
     for (const note of notes) expect(note).not.toContain('NaN')
   })
 })

@@ -2,13 +2,42 @@
 // sprites, and the selected creature's vision radius + energy bar. Drawn on
 // top of drawMap's terrain pass; mirrors its viewport math (see
 // worldgen/mapgen.js's drawMap) so both layers line up under pan/zoom.
+//
+// Nothing here reads a creature's *tile*. Every sprite is drawn at the
+// interpolated position the motion layer maintains (see sim/motion.js), so a
+// creature that the sim moves five times a second is drawn moving
+// continuously between those tiles rather than teleporting between them.
+//
+// The pose that motion layer hands back also decides which of two completely
+// different animations a creature gets. On land it hops or trots: an arc off
+// the ground, the body swelling as it nears the top of it, its shadow
+// staying put and shrinking underneath. In water it does none of that - it
+// rides low with its back end under the surface, bobs on its own stroke
+// cycle, and drags a wake and a set of expanding ripples behind it. Telling
+// "swimming" from "walking through a shallow bit" at a glance is the whole
+// point: water is now a place only some creatures can go (see sim/water.js).
 
 import { FOREST_VISION_FACTOR, foxStats } from './fox.js'
 import { TILE } from '../worldgen/mapgen.js'
 import { BURROW_CAPACITY, burrowLinks } from './burrow.js'
+import { motionPose } from './motion.js'
 import { rabbitStats } from './rabbit.js'
 
 const VISION_RADIUS = 5 // tiles - keep in sync with sim/simulation.js
+
+/** Where to draw a creature: the smooth position, falling back to its tile
+ * for anything constructed without a motion state (tests, mostly). */
+function renderX(entity) {
+  return entity.renderX ?? entity.x
+}
+function renderY(entity) {
+  return entity.renderY ?? entity.y
+}
+/** Which way it is pointing, smoothed. Foxes carry a real heading; rabbits
+ * face whichever way they last moved. */
+function renderFacing(entity) {
+  return entity.renderFacing ?? entity.heading ?? entity.facing ?? 0
+}
 
 export function drawSimulation(ctx, map, sim, tilePx, viewport) {
   const ox = viewport.originX * tilePx
@@ -107,6 +136,82 @@ function drawOccupancyPips(ctx, cx, cy, r, occupied) {
   }
 }
 
+// ============================== In the water =============================
+// Three pieces of furniture every swimmer gets, drawn on the water plane
+// rather than on the sprite: rings spreading from where it is treading,
+// a V of wake trailing behind it, and - for anything out of its depth - the
+// splashing that says this is panic, not travel. Together they're what makes
+// a swimming creature read as *in* the water rather than on top of it, which
+// a flat sprite over a blue tile never does.
+
+// How far down the sprite's own axis the surface cuts across it. Top-down,
+// the "waterline" isn't a horizon - it's the point along the body where the
+// animal stops being visible, so everything behind its shoulders is under.
+const WATERLINE = 0.35
+
+function drawRipples(ctx, cx, cy, r, phase, strength) {
+  for (let i = 0; i < 3; i++) {
+    const p = (phase + i / 3) % 1
+    const rad = r * (0.85 + 2.1 * p)
+    ctx.beginPath()
+    ctx.ellipse(cx, cy, rad, rad * 0.42, 0, 0, Math.PI * 2)
+    ctx.strokeStyle = `rgba(226,244,255,${(0.34 * (1 - p) * strength).toFixed(3)})`
+    ctx.lineWidth = Math.max(0.5, r * 0.09 * (1 - p))
+    ctx.stroke()
+  }
+}
+
+function drawWake(ctx, cx, cy, r, facing) {
+  const backX = -Math.cos(facing)
+  const backY = -Math.sin(facing)
+  const perpX = -backY
+  const perpY = backX
+  ctx.strokeStyle = 'rgba(236,250,255,0.34)'
+  ctx.lineWidth = Math.max(0.5, r * 0.12)
+  ctx.beginPath()
+  for (const side of [-1, 1]) {
+    ctx.moveTo(cx + backX * r * 0.5 + perpX * side * r * 0.2, cy + (backY * r * 0.5 + perpY * side * r * 0.2) * 0.5)
+    ctx.lineTo(cx + backX * r * 2.4 + perpX * side * r * 1.1, cy + (backY * r * 2.4 + perpY * side * r * 1.1) * 0.5)
+  }
+  ctx.stroke()
+}
+
+const SPLASH_ANGLES = [0.4, 1.5, 2.6, 3.7, 4.8, 5.9]
+function drawSplashes(ctx, cx, cy, r, phase) {
+  ctx.fillStyle = 'rgba(240,252,255,0.75)'
+  for (let i = 0; i < SPLASH_ANGLES.length; i++) {
+    const p = (phase * 2 + i / SPLASH_ANGLES.length) % 1
+    const dist = r * (0.7 + 1.3 * p)
+    const a = SPLASH_ANGLES[i]
+    ctx.beginPath()
+    ctx.arc(cx + Math.cos(a) * dist, cy + Math.sin(a) * dist * 0.5, Math.max(0.4, r * 0.16 * (1 - p)), 0, Math.PI * 2)
+    ctx.fill()
+  }
+}
+
+/** Hide everything behind the waterline. Called inside the sprite's own
+ * rotated space, so "behind" means down the body's axis - the animal's back
+ * end is under the surface, whichever way it happens to be pointing. */
+function clipToSurface(ctx, r) {
+  ctx.beginPath()
+  ctx.rect(-r * 4, -r * 4, r * 8, r * 4 + r * WATERLINE)
+  ctx.clip()
+}
+
+/** The line the body cuts in the surface, plus the foam gathered against it.
+ * Drawn in the sprite's rotated space, straight after the clip is released. */
+function drawSurfaceCut(ctx, r, width) {
+  ctx.beginPath()
+  ctx.ellipse(0, r * WATERLINE, width, width * 0.3, 0, 0, Math.PI * 2)
+  ctx.fillStyle = 'rgba(120,180,214,0.5)'
+  ctx.fill()
+  ctx.beginPath()
+  ctx.ellipse(0, r * WATERLINE, width, width * 0.3, 0, Math.PI, Math.PI * 2)
+  ctx.strokeStyle = 'rgba(240,252,255,0.7)'
+  ctx.lineWidth = Math.max(0.4, r * 0.09)
+  ctx.stroke()
+}
+
 function drawRabbits(ctx, sim, tilePx, ox, oy, startX, startY, endX, endY) {
   const r = Math.max(1.5, tilePx * 0.22)
   for (const rabbit of sim.rabbits) {
@@ -115,22 +220,29 @@ function drawRabbits(ctx, sim, tilePx, ox, oy, startX, startY, endX, endY) {
     // sheltering rabbit shows up (see drawBurrows), which is also the honest
     // picture - a fox can't see it either.
     if (rabbit.burrowId != null) continue
-    if (rabbit.x < startX - 1 || rabbit.x > endX + 1 || rabbit.y < startY - 1 || rabbit.y > endY + 1) continue
-    const cx = (rabbit.x + 0.5) * tilePx - ox
-    const cy = (rabbit.y + 0.5) * tilePx - oy
+    const px = renderX(rabbit)
+    const py = renderY(rabbit)
+    if (px < startX - 1 || px > endX + 1 || py < startY - 1 || py > endY + 1) continue
+    const cx = (px + 0.5) * tilePx - ox
+    // Where the creature meets the world - the ground it casts a shadow on,
+    // or the surface it is floating in. The body itself is drawn off this by
+    // the pose's lift, which is what a hop (or a bob) actually is.
+    const baseY = (py + 0.5) * tilePx - oy
+    const pose = motionPose(rabbit)
+    const cy = baseY - pose.lift * r
     const selected = sim.selectedKind === 'rabbit' && rabbit.id === sim.selectedId
 
     if (selected) {
       // Two rings, because a rabbit now has two senses with very different
       // reach: what it can see, and the much wider circle it can hear.
-      drawVisionRadius(ctx, cx, cy, rabbitStats(rabbit.genes).hearingRadius * tilePx, 'rgba(147,197,253,')
-      drawVisionRadius(ctx, cx, cy, VISION_RADIUS * tilePx, 'rgba(255,224,102,')
+      drawVisionRadius(ctx, cx, baseY, rabbitStats(rabbit.genes).hearingRadius * tilePx, 'rgba(147,197,253,')
+      drawVisionRadius(ctx, cx, baseY, VISION_RADIUS * tilePx, 'rgba(255,224,102,')
     }
     if (rabbit.alarmUntil > sim.clock && tilePx >= 6) drawAlarmCall(ctx, cx, cy, r)
 
     // Panic reads first: a fleeing rabbit is the most important thing on
     // screen, so it gets a colour nothing else uses plus an alarm ring.
-    const [baseR, baseG, baseB] = rabbit.fleeing
+    const pelt = rabbit.fleeing
       ? [254, 205, 211]
       : rabbit.searching
         ? [125, 211, 252]
@@ -142,39 +254,106 @@ function drawRabbits(ctx, sim, tilePx, ox, oy, startX, startY, endX, endY) {
 
     if (rabbit.fleeing && tilePx >= 5) drawAlarmRing(ctx, cx, cy, r)
 
-    // Soft ground shadow so the rabbit reads as sitting on the tile rather
-    // than floating as a flat sprite on top of it.
-    if (tilePx >= 5) {
-      ctx.beginPath()
-      ctx.fillStyle = 'rgba(20,16,10,0.22)'
-      ctx.ellipse(cx, cy + r * 0.75, r * 0.9, r * 0.32, 0, 0, Math.PI * 2)
-      ctx.fill()
-    }
+    if (rabbit.swimming) drawSwimmingRabbit(ctx, cx, baseY, cy, r, tilePx, rabbit, pose, pelt, selected)
+    else drawHoppingRabbit(ctx, cx, baseY, cy, r, tilePx, pose, pelt, selected)
 
-    // Tail drawn before the body: the body fill covers its inner half, so
-    // only a fluffy crescent pokes out the back, the same way the ears
-    // poke out the front.
-    if (tilePx >= 8) drawTail(ctx, cx, cy, r)
-
-    // Body: a radial gradient instead of a flat fill gives it some
-    // roundness/volume rather than reading as a flat disc from above.
-    ctx.beginPath()
-    ctx.arc(cx, cy, r, 0, Math.PI * 2)
-    const grad = ctx.createRadialGradient(cx - r * 0.35, cy - r * 0.4, r * 0.15, cx, cy, r * 1.15)
-    grad.addColorStop(0, rgb(Math.min(255, baseR + 20), Math.min(255, baseG + 20), Math.min(255, baseB + 20)))
-    grad.addColorStop(0.65, rgb(baseR, baseG, baseB))
-    grad.addColorStop(1, rgb(baseR * 0.76, baseG * 0.76, baseB * 0.76))
-    ctx.fillStyle = grad
-    ctx.fill()
-    ctx.lineWidth = Math.max(0.5, tilePx * 0.03)
-    ctx.strokeStyle = selected ? 'rgba(255,224,102,0.9)' : 'rgba(60,50,40,0.6)'
-    ctx.stroke()
-
-    if (tilePx >= 12) drawFur(ctx, cx, cy, r, baseR, baseG, baseB)
-    if (tilePx >= 8) drawEars(ctx, cx, cy, r)
-    if (tilePx >= 10) drawFace(ctx, cx, cy, r)
     if (selected && tilePx >= 6) drawEnergyBar(ctx, cx, cy, r, tilePx, rabbit.energy / 100, 'rgb(120,214,110)')
   }
+}
+
+// ------------------------------- on land ---------------------------------
+// The hop is the whole animation: the body rises along an arc between tiles
+// (see motionPose), swells slightly at the top of it as it comes nearer the
+// camera, and its shadow stays behind on the ground and shrinks. None of
+// that changes where the rabbit is - it is the same tile step it always was,
+// just drawn over the 400ms it takes rather than in one frame.
+function drawHoppingRabbit(ctx, cx, baseY, cy, r, tilePx, pose, pelt, selected) {
+  if (tilePx >= 5) {
+    ctx.beginPath()
+    ctx.fillStyle = `rgba(20,16,10,${(0.22 * pose.shadow).toFixed(3)})`
+    ctx.ellipse(cx, baseY + r * 0.75, r * 0.9 * pose.shadow, r * 0.32 * pose.shadow, 0, 0, Math.PI * 2)
+    ctx.fill()
+  }
+
+  const rr = r * pose.scale
+  // Tail drawn before the body: the body fill covers its inner half, so
+  // only a fluffy crescent pokes out the back, the same way the ears
+  // poke out the front.
+  if (tilePx >= 8) drawTail(ctx, cx, cy, rr)
+  drawRabbitBody(ctx, cx, cy, rr, tilePx, pelt, selected)
+  if (tilePx >= 12) drawFur(ctx, cx, cy, rr, pelt[0], pelt[1], pelt[2])
+  // Ears stream backwards mid-hop and settle when it lands, which is the
+  // detail that stops a hopping rabbit reading as a bouncing ball.
+  if (tilePx >= 8) drawEars(ctx, cx, cy, rr, pose.stride * 0.45)
+  if (tilePx >= 10) drawFace(ctx, cx, cy, rr)
+}
+
+// ------------------------------ in the water ------------------------------
+// Nothing about the land pose survives here. A swimming rabbit is turned to
+// face the way it is going (on land it is drawn radially symmetric, which is
+// fine for something that hops in place - not for something with a wake), it
+// is cut off at the waterline so only its head and shoulders show, and its
+// ears go flat. What moves is the bob and the ripples, not a hop.
+function drawSwimmingRabbit(ctx, cx, surfaceY, cy, r, tilePx, rabbit, pose, pelt, selected) {
+  if (tilePx >= 5) {
+    drawRipples(ctx, cx, surfaceY, r, pose.stroke, rabbit.floundering ? 1.4 : 1)
+    if (pose.moving) drawWake(ctx, cx, surfaceY, r, renderFacing(rabbit))
+  }
+
+  ctx.save()
+  ctx.translate(cx, cy)
+  // Sprite is authored nose-up, headings point +x: the same quarter turn the
+  // foxes use.
+  ctx.rotate(renderFacing(rabbit) + Math.PI / 2)
+
+  // The body it is dragging along under the surface: visible as a shape in
+  // the water rather than a sprite on it, so the head above the line has
+  // something to belong to.
+  ctx.beginPath()
+  ctx.fillStyle = 'rgba(46,92,120,0.5)'
+  ctx.ellipse(0, r * 0.8, r * 0.6, r * 1.15, 0, 0, Math.PI * 2)
+  ctx.fill()
+
+  ctx.save()
+  clipToSurface(ctx, r)
+  // Ears go flat along the water behind it - drawn before the head so they
+  // trail from it rather than sitting on top of it.
+  if (tilePx >= 8) drawLaidBackEars(ctx, r)
+  drawRabbitBody(ctx, 0, -r * 0.14, r * 0.76, tilePx, pelt, selected)
+  if (tilePx >= 10) drawFace(ctx, 0, -r * 0.14, r * 0.76)
+  ctx.restore()
+  if (tilePx >= 6) drawSurfaceCut(ctx, r, r * 0.72)
+  ctx.restore()
+
+  // Out of its depth: the splashing is the tell that this is a rabbit
+  // drowning rather than a rabbit crossing (see sim/water.js).
+  if (rabbit.floundering && tilePx >= 6) drawSplashes(ctx, cx, surfaceY, r, pose.stroke)
+}
+
+/** Ears swept straight back along the surface, for the swim pose. */
+function drawLaidBackEars(ctx, r) {
+  for (const side of [-1, 1]) {
+    ctx.beginPath()
+    ctx.fillStyle = 'rgb(226,222,214)'
+    ctx.ellipse(side * r * 0.3, r * 0.12, r * 0.16, r * 0.5, side * 0.42, 0, Math.PI * 2)
+    ctx.fill()
+  }
+}
+
+// Body: a radial gradient instead of a flat fill gives it some roundness/
+// volume rather than reading as a flat disc from above.
+function drawRabbitBody(ctx, cx, cy, r, tilePx, [baseR, baseG, baseB], selected) {
+  ctx.beginPath()
+  ctx.arc(cx, cy, r, 0, Math.PI * 2)
+  const grad = ctx.createRadialGradient(cx - r * 0.35, cy - r * 0.4, r * 0.15, cx, cy, r * 1.15)
+  grad.addColorStop(0, rgb(Math.min(255, baseR + 20), Math.min(255, baseG + 20), Math.min(255, baseB + 20)))
+  grad.addColorStop(0.65, rgb(baseR, baseG, baseB))
+  grad.addColorStop(1, rgb(baseR * 0.76, baseG * 0.76, baseB * 0.76))
+  ctx.fillStyle = grad
+  ctx.fill()
+  ctx.lineWidth = Math.max(0.5, tilePx * 0.03)
+  ctx.strokeStyle = selected ? 'rgba(255,224,102,0.9)' : 'rgba(60,50,40,0.6)'
+  ctx.stroke()
 }
 
 function drawTail(ctx, cx, cy, r) {
@@ -266,21 +445,25 @@ function drawAlarmRing(ctx, cx, cy, r) {
   ctx.stroke()
 }
 
-function drawEars(ctx, cx, cy, r) {
+// `lean` (0..1) sweeps the ears backwards: partway through a hop, and all
+// the way flat while swimming, which is what a rabbit in water actually
+// does with them.
+function drawEars(ctx, cx, cy, r, lean = 0) {
+  const dropY = cy - r * (1.1 - 0.55 * lean)
+  const tilt = 0.3 + 0.9 * lean
+  const length = r * (0.6 - 0.12 * lean)
   ctx.fillStyle = 'rgb(235,231,224)'
-  ctx.beginPath()
-  ctx.ellipse(cx - r * 0.4, cy - r * 1.1, r * 0.22, r * 0.6, -0.3, 0, Math.PI * 2)
-  ctx.fill()
-  ctx.beginPath()
-  ctx.ellipse(cx + r * 0.4, cy - r * 1.1, r * 0.22, r * 0.6, 0.3, 0, Math.PI * 2)
-  ctx.fill()
+  for (const side of [-1, 1]) {
+    ctx.beginPath()
+    ctx.ellipse(cx + side * r * (0.4 + 0.12 * lean), dropY, r * 0.22, length, side * tilt, 0, Math.PI * 2)
+    ctx.fill()
+  }
   ctx.fillStyle = 'rgba(220,140,150,0.55)'
-  ctx.beginPath()
-  ctx.ellipse(cx - r * 0.4, cy - r * 1.08, r * 0.11, r * 0.38, -0.3, 0, Math.PI * 2)
-  ctx.fill()
-  ctx.beginPath()
-  ctx.ellipse(cx + r * 0.4, cy - r * 1.08, r * 0.11, r * 0.38, 0.3, 0, Math.PI * 2)
-  ctx.fill()
+  for (const side of [-1, 1]) {
+    ctx.beginPath()
+    ctx.ellipse(cx + side * r * (0.4 + 0.12 * lean), dropY + r * 0.02, r * 0.11, length * 0.63, side * tilt, 0, Math.PI * 2)
+    ctx.fill()
+  }
 }
 
 function drawEnergyBar(ctx, cx, cy, r, tilePx, fraction, color) {
@@ -312,9 +495,16 @@ function drawFoxes(ctx, map, sim, tilePx, ox, oy, startX, startY, endX, endY) {
   const r = Math.max(2.5, tilePx * 0.4)
   for (const fox of sim.foxes) {
     if (!fox.alive) continue
-    if (fox.x < startX - 2 || fox.x > endX + 2 || fox.y < startY - 2 || fox.y > endY + 2) continue
-    const cx = (fox.x + 0.5) * tilePx - ox
-    const cy = (fox.y + 0.5) * tilePx - oy
+    const px = renderX(fox)
+    const py = renderY(fox)
+    if (px < startX - 2 || px > endX + 2 || py < startY - 2 || py > endY + 2) continue
+    const cx = (px + 0.5) * tilePx - ox
+    const baseY = (py + 0.5) * tilePx - oy
+    const pose = motionPose(fox)
+    // A fox trots rather than hops, so it barely leaves the ground: a
+    // quarter of the rabbit's arc, which reads as a gait rather than a bounce.
+    const cy = baseY - pose.lift * r * 0.25
+    const facing = renderFacing(fox)
     const selected = sim.selectedKind === 'fox' && fox.id === sim.selectedId
     const stats = foxStats(fox.genes)
 
@@ -324,28 +514,69 @@ function drawFoxes(ctx, map, sim, tilePx, ox, oy, startX, startY, endX, endY) {
     if (selected) {
       const inForest = map.tileType[fox.y * map.size + fox.x] === TILE.FOREST
       const visionPx = stats.visionRadius * (inForest ? FOREST_VISION_FACTOR : 1) * tilePx
-      drawVisionRadius(ctx, cx, cy, visionPx, 'rgba(251,146,60,')
+      drawVisionRadius(ctx, cx, baseY, visionPx, 'rgba(251,146,60,')
     }
     if (fox.hunting && tilePx >= 5) drawMenaceGlow(ctx, cx, cy, r)
+
+    // Swimming furniture goes on the water plane, under the fox itself.
+    if (fox.swimming && tilePx >= 5) {
+      drawRipples(ctx, cx, baseY, r * 0.8, pose.stroke, fox.floundering ? 1.4 : 1)
+      if (pose.moving) drawWake(ctx, cx, baseY, r * 0.8, facing)
+    }
 
     ctx.save()
     ctx.translate(cx, cy)
     // Sprite is authored nose-up; heading 0 points +x, hence the quarter turn.
-    ctx.rotate(fox.heading + Math.PI / 2)
+    ctx.rotate(facing + Math.PI / 2)
     // Camouflage literally makes it harder to see: the pelt desaturates
     // toward dead-grass brown and the whole sprite loses some opacity.
     ctx.globalAlpha = 1 - 0.28 * fox.genes.camouflage
-    drawFoxBody(ctx, r, fox, tilePx, selected)
+    if (fox.swimming) {
+      ctx.save()
+      clipToSurface(ctx, r)
+      ctx.beginPath()
+      ctx.fillStyle = 'rgba(58,104,132,0.5)'
+      ctx.ellipse(0, r * 0.8, r * 0.7, r * 1.5, 0, 0, Math.PI * 2)
+      ctx.fill()
+      drawFoxBody(ctx, r, fox, tilePx, selected, pose, true)
+      ctx.restore()
+      if (tilePx >= 6) drawSurfaceCut(ctx, r, r * 0.62)
+      // The brush tail doesn't sink - it trails along the surface behind,
+      // which is the single most recognisable thing about a swimming fox.
+      if (tilePx >= 8) drawTrailingTail(ctx, r, pose.stroke)
+    } else {
+      drawFoxBody(ctx, r, fox, tilePx, selected, pose, false)
+    }
     ctx.restore()
 
-    if (fox.sprinting && tilePx >= 6) drawSprintStreaks(ctx, cx, cy, r, fox.heading)
+    if (fox.floundering && tilePx >= 6) drawSplashes(ctx, cx, baseY, r * 0.8, pose.stroke)
+    if (fox.sprinting && tilePx >= 6) drawSprintStreaks(ctx, cx, cy, r, facing)
     if (fox.feedingRemaining > 0 && tilePx >= 6) drawFeedingMark(ctx, cx, cy, r)
     if (fox.packing && tilePx >= 8) drawPackMark(ctx, cx, cy, r)
     if (selected && tilePx >= 6) drawEnergyBar(ctx, cx, cy, r, tilePx, fox.energy / FOX_ENERGY_MAX, 'rgb(251,146,60)')
   }
 }
 
-function drawFoxBody(ctx, r, fox, tilePx, selected) {
+// A wet brush tail laid out flat on the water behind the fox, swinging with
+// the stroke cycle. Drawn outside the waterline clip, since the point of it
+// is that it is the one part still visible on the surface.
+function drawTrailingTail(ctx, r, stroke) {
+  const sway = Math.sin(stroke * Math.PI * 2) * 0.3
+  ctx.save()
+  ctx.translate(0, r * 0.25)
+  ctx.rotate(sway)
+  ctx.beginPath()
+  ctx.fillStyle = 'rgba(150,86,44,0.8)'
+  ctx.ellipse(0, r * 0.75, r * 0.2, r * 0.8, 0, 0, Math.PI * 2)
+  ctx.fill()
+  ctx.beginPath()
+  ctx.fillStyle = 'rgba(240,238,232,0.85)'
+  ctx.ellipse(0, r * 1.4, r * 0.14, r * 0.22, 0, 0, Math.PI * 2)
+  ctx.fill()
+  ctx.restore()
+}
+
+function drawFoxBody(ctx, r, fox, tilePx, selected, pose, swimming) {
   const camo = fox.genes.camouflage
   // Rust orange, pulled toward dry-grass brown as camouflage rises - but
   // only part of the way, so even a fully camouflaged fox still reads as a
@@ -354,34 +585,49 @@ function drawFoxBody(ctx, r, fox, tilePx, selected) {
   const peltDark = pelt.map((c) => c * 0.66)
 
   // Ground shadow (drawn in local space, so it stretches along the body).
-  if (tilePx >= 5) {
+  // None of this exists in the water: a swimming fox has a wake instead of a
+  // shadow, its brush tail floats behind it rather than streaming out flat
+  // (see drawTrailingTail), and its legs are under the surface entirely.
+  if (tilePx >= 5 && !swimming) {
     ctx.beginPath()
-    ctx.fillStyle = 'rgba(20,16,10,0.25)'
-    ctx.ellipse(0, r * 0.25, r * 0.75, r * 1.05, 0, 0, Math.PI * 2)
+    ctx.fillStyle = `rgba(20,16,10,${(0.25 * pose.shadow).toFixed(3)})`
+    ctx.ellipse(0, r * 0.25, r * 0.75 * pose.shadow, r * 1.05 * pose.shadow, 0, 0, Math.PI * 2)
     ctx.fill()
   }
 
-  // Brush tail: long, thick, white-tipped - the fox's most recognisable
-  // silhouette cue at small zoom levels.
-  ctx.beginPath()
-  ctx.fillStyle = rgb(...peltDark)
-  ctx.ellipse(0, r * 1.5, r * 0.4, r * 0.85, 0, 0, Math.PI * 2)
-  ctx.fill()
-  if (tilePx >= 8) {
+  if (!swimming) {
+    // Brush tail: long, thick, white-tipped - the fox's most recognisable
+    // silhouette cue at small zoom levels. It counterweights the trot,
+    // swinging opposite the stride.
+    const sway = Math.sin(pose.stroke * Math.PI * 2) * 0.22 * (0.4 + pose.stride)
+    ctx.save()
+    ctx.rotate(sway)
     ctx.beginPath()
-    ctx.fillStyle = 'rgb(245,242,236)'
-    ctx.ellipse(0, r * 2.1, r * 0.26, r * 0.32, 0, 0, Math.PI * 2)
+    ctx.fillStyle = rgb(...peltDark)
+    ctx.ellipse(0, r * 1.5, r * 0.4, r * 0.85, 0, 0, Math.PI * 2)
     ctx.fill()
+    if (tilePx >= 8) {
+      ctx.beginPath()
+      ctx.fillStyle = 'rgb(245,242,236)'
+      ctx.ellipse(0, r * 2.1, r * 0.26, r * 0.32, 0, 0, Math.PI * 2)
+      ctx.fill()
+    }
+    ctx.restore()
   }
 
   // Dark legs, drawn before the body so the fill covers their inner half and
   // only the paws poke out the sides - the same trick the tail and ears use.
-  // (Drawn on top they just read as spots on its back.)
-  if (tilePx >= 12) {
+  // (Drawn on top they just read as spots on its back.) Diagonal pairs swing
+  // together and alternate every step, which is what a trot is - the legs
+  // are the difference between a fox crossing the ground and a fox sliding
+  // across it.
+  if (tilePx >= 12 && !swimming) {
+    const reach = pose.stride * 0.3
+    const lead = fox.stepParity ? 1 : -1
     ctx.fillStyle = 'rgba(56,34,22,0.9)'
-    for (const [lx, ly] of [[-0.62, -0.42], [0.62, -0.42], [-0.6, 0.5], [0.6, 0.5]]) {
+    for (const [lx, ly, pair] of [[-0.62, -0.42, 1], [0.62, -0.42, -1], [-0.6, 0.5, -1], [0.6, 0.5, 1]]) {
       ctx.beginPath()
-      ctx.ellipse(r * lx, r * ly, r * 0.17, r * 0.26, 0, 0, Math.PI * 2)
+      ctx.ellipse(r * lx, r * (ly - reach * pair * lead), r * 0.17, r * 0.26, 0, 0, Math.PI * 2)
       ctx.fill()
     }
   }

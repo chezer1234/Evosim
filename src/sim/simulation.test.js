@@ -727,6 +727,208 @@ describe('burrows', () => {
   })
 })
 
+describe('swimming', () => {
+  /** An open map with a lake filling columns `x0`..`x1` (inclusive), so a
+   * creature on one side has to cross water to reach the other. */
+  function makeLakeMap(size, x0, x1) {
+    const map = makeOpenMap(size)
+    for (let y = 1; y < size - 1; y++) {
+      for (let x = x0; x <= x1; x++) map.tileType[y * size + x] = TILE.LAKE
+    }
+    return map
+  }
+
+  it('will not let a rabbit without the gene set foot in the water', () => {
+    const sim = createSimulation(makeLakeMap(15, 8, 11))
+    // Bolting from a fox to its west: straight into the lake, if it could.
+    const rabbit = spawnRabbit(sim, 7, 7, jumpyBrain(), 100, 0, rabbitGenes({ swimming: 0 }))
+    spawnFox(sim, 5, 7, hunterGenes({ speed: 0 }), 60)
+
+    runFor(sim, 3000)
+
+    expect(rabbit.fleeing).toBe(true)
+    expect(rabbit.x).toBeLessThan(8) // cornered against the shore
+    expect(rabbit.swimming).toBe(false)
+  })
+
+  it('lets a rabbit that has the gene cross, and drops it into the swim animation state', () => {
+    const sim = createSimulation(makeLakeMap(15, 8, 11))
+    const rabbit = spawnRabbit(sim, 7, 7, jumpyBrain(), 100, 0, rabbitGenes({ swimming: 1 }))
+    spawnFox(sim, 5, 7, hunterGenes({ speed: 0 }), 60)
+
+    let everSwam = false
+    for (let elapsed = 0; elapsed < 4000; elapsed += TICK_MS) {
+      stepSimulation(sim, TICK_MS)
+      everSwam = everSwam || rabbit.swimming
+      expect(rabbit.floundering).toBe(false) // it belongs out there
+    }
+
+    expect(rabbit.x).toBeGreaterThan(7)
+    expect(everSwam).toBe(true)
+  })
+
+  it('is the escape it looks like: a landlocked fox breaks off at the bank', () => {
+    const sim = createSimulation(makeLakeMap(15, 8, 11))
+    const rabbit = spawnRabbit(sim, 9, 7, jumpyBrain(), 100, 0, rabbitGenes({ swimming: 1 }))
+    const fox = spawnFox(sim, 6, 7, hunterGenes({ speed: 1, swimming: 0 }), 90)
+
+    runFor(sim, 4000)
+
+    expect(fox.x).toBeLessThan(8)
+    expect(fox.swimming).toBe(false)
+    expect(rabbit.alive).toBe(true)
+    expect(sim.kills).toBe(0)
+  })
+
+  it('and stops being one once the foxes evolve the same gene', () => {
+    const sim = createSimulation(makeLakeMap(15, 8, 11))
+    spawnRabbit(sim, 10, 7, fearlessBrain(), 100, 0, rabbitGenes({ swimming: 1 }))
+    const fox = spawnFox(sim, 7, 7, hunterGenes({ speed: 1, swimming: 1 }), 90)
+
+    let followedIn = false
+    for (let elapsed = 0; elapsed < 4000; elapsed += TICK_MS) {
+      stepSimulation(sim, TICK_MS)
+      followedIn = followedIn || fox.swimming
+    }
+
+    expect(followedIn).toBe(true)
+    expect(sim.kills).toBe(1) // and the lake stops being anywhere to hide
+  })
+
+  it('crosses more slowly than it walks, at a pace set by the gene', () => {
+    // Same brain, same start, same water: the only difference is how good at
+    // it each one is (2 ticks a tile against 7 - see rabbitStats).
+    function tilesCrossedIn(skill, ms) {
+      const sim = createSimulation(makeLakeMap(21, 6, 17))
+      const rabbit = spawnRabbit(sim, 7, 10, jumpyBrain(), 100, 0, rabbitGenes({ swimming: skill }))
+      spawnFox(sim, 3, 10, hunterGenes({ speed: 0 }), 60)
+      runFor(sim, ms)
+      return rabbit.x - 7
+    }
+    expect(tilesCrossedIn(1, 4000)).toBeGreaterThan(tilesCrossedIn(0.4, 4000))
+  })
+
+  it('burns energy far faster in the water than on the same ground dry', () => {
+    const wet = createSimulation(makeLakeMap(15, 1, 13))
+    const swimmer = spawnRabbit(wet, 7, 7, zeroBrain(), 100, 0, rabbitGenes({ swimming: 0.5 }))
+    const dry = createSimulation(makeOpenMap(15))
+    const walker = spawnRabbit(dry, 7, 7, zeroBrain(), 100, 0, rabbitGenes({ swimming: 0.5 }))
+
+    runFor(wet, 10000)
+    runFor(dry, 10000)
+
+    expect(swimmer.energy).toBeLessThan(walker.energy)
+  })
+
+  it('drowns a rabbit that runs out of energy out there, and counts it', () => {
+    const sim = createSimulation(makeLakeMap(15, 1, 13))
+    const rabbit = spawnRabbit(sim, 7, 7, zeroBrain(), 3, 0, rabbitGenes({ swimming: 0.6 }))
+
+    runFor(sim, 12000)
+
+    expect(rabbit.alive).toBe(false)
+    expect(rabbit.drowned).toBe(true)
+    expect(sim.drownings).toBe(1)
+  })
+
+  it('leaves a rabbit dropped in deep water floundering for the nearest shore', () => {
+    // Nothing evolved about this - it is what happens when you put a
+    // non-swimmer in a lake with the spawn palette.
+    const sim = createSimulation(makeLakeMap(15, 4, 13))
+    const rabbit = spawnRabbit(sim, 7, 7, zeroBrain(), 100, 0, rabbitGenes({ swimming: 0 }))
+
+    expect(rabbit.floundering).toBe(true)
+    runFor(sim, 6000)
+
+    expect(rabbit.x).toBeLessThan(7) // the bank at x=3 is the closest way out
+    expect(rabbit.energy).toBeLessThan(100)
+  })
+
+  it('gets that rabbit back onto dry land, where it stops floundering', () => {
+    const sim = createSimulation(makeLakeMap(15, 5, 9))
+    const rabbit = spawnRabbit(sim, 5, 7, zeroBrain(), 100, 0, rabbitGenes({ swimming: 0 }))
+
+    runFor(sim, 6000)
+
+    expect(rabbit.swimming).toBe(false)
+    expect(rabbit.floundering).toBe(false)
+    expect(rabbit.alive).toBe(true)
+  })
+
+  it('slows a swimming fox to a paddle - no sprinting in the water', () => {
+    const sim = createSimulation(makeLakeMap(21, 6, 17))
+    spawnRabbit(sim, 16, 10, fearlessBrain(), 100, 0, rabbitGenes({ swimming: 1 }))
+    const fox = spawnFox(sim, 8, 10, hunterGenes({ speed: 1, swimming: 1 }), 100)
+
+    runFor(sim, 2000)
+
+    expect(fox.swimming).toBe(true)
+    expect(fox.sprinting).toBe(false)
+  })
+
+  it('counts a drowned fox too', () => {
+    const sim = createSimulation(makeLakeMap(15, 1, 13))
+    const fox = spawnFox(sim, 7, 7, hunterGenes({ swimming: 0 }), 2)
+
+    runFor(sim, 4000)
+
+    expect(fox.alive).toBe(false)
+    expect(sim.drownings).toBe(1)
+  })
+})
+
+describe('smooth motion', () => {
+  it('gives every spawned creature a drawn position on its own tile', () => {
+    const sim = createSimulation(makeOpenMap(11))
+    const rabbit = spawnRabbit(sim, 5, 5, zeroBrain(), 100)
+    const fox = spawnFox(sim, 3, 3, foxGenes(), 100)
+    expect([rabbit.renderX, rabbit.renderY]).toEqual([5, 5])
+    expect([fox.renderX, fox.renderY]).toEqual([3, 3])
+  })
+
+  it('draws a stepping rabbit between tiles rather than on top of one', () => {
+    const sim = createSimulation(makeOpenMap(15))
+    const rabbit = spawnRabbit(sim, 8, 7, fearlessBrain(), 100)
+    spawnFox(sim, 7, 7, hunterGenes({ speed: 0 }), 60)
+
+    // Frame-sized steps, the way the render loop drives it: the tile changes
+    // on one decision tick and the sprite spends the frames after it
+    // travelling there, which is the entire point.
+    const drawn = []
+    for (let elapsed = 0; elapsed < 400; elapsed += 20) {
+      stepSimulation(sim, 20)
+      drawn.push(rabbit.renderX)
+    }
+
+    expect(rabbit.x).toBeGreaterThan(8) // it bolted east, away from the fox
+    expect(drawn.some((x) => x > 8 && x < 9)).toBe(true)
+  })
+
+  it('catches the drawn position up to the tile when a creature stops', () => {
+    const sim = createSimulation(makeOpenMap(11))
+    const rabbit = spawnRabbit(sim, 5, 5, zeroBrain(), 100) // never moves
+    runFor(sim, 2000)
+    expect(rabbit.renderX).toBeCloseTo(rabbit.x, 6)
+    expect(rabbit.renderY).toBeCloseTo(rabbit.y, 6)
+  })
+
+  it('never lets the drawn position run away from the tile a creature is on', () => {
+    // A sprinting fox can take two tiles in one decision tick, so the sprite
+    // can be a whole two tiles behind for the instant before it travels
+    // them - but it is always catching up, never drifting.
+    const sim = createSimulation(makeOpenMap(21))
+    spawnRabbit(sim, 10, 10, jumpyBrain(), 100)
+    const fox = spawnFox(sim, 6, 10, hunterGenes({ speed: 1 }), 100)
+    for (let i = 0; i < 200; i++) {
+      stepSimulation(sim, 40)
+      for (const c of [...sim.rabbits, fox]) {
+        expect(Math.abs(c.renderX - c.x)).toBeLessThanOrEqual(2.001)
+        expect(Math.abs(c.renderY - c.y)).toBeLessThanOrEqual(2.001)
+      }
+    }
+  })
+})
+
 describe('foxes in forest cover', () => {
   /** An open map with a band of FOREST down the middle column range. */
   function makeForestMap(size) {

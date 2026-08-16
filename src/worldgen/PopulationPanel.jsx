@@ -94,7 +94,7 @@ function PopulationChart({ history }) {
 /** `mapInfo` carries the map's size/lakes/seed - shown here only when the
  * caller has nowhere else to put them, which on a compact screen is the case:
  * the phone toolbar has room for the live counts and nothing more. */
-export default function PopulationPanel({ population, foxPopulation, kills, burrows, sheltered, history, generationRange, foxGenerationRange, mapInfo, onClose }) {
+export default function PopulationPanel({ population, foxPopulation, kills, burrows, sheltered, swimmers, drownings, history, generationRange, foxGenerationRange, mapInfo, onClose }) {
   const latest = history[history.length - 1]
   const hasFoxTrend = history.some((s) => s.foxGenes)
   const hasSenseTrend = history.some((s) => s.rabbitGenes)
@@ -120,6 +120,14 @@ export default function PopulationPanel({ population, foxPopulation, kills, burr
       <p className="text-xs text-neutral-400">
         🕳 {burrows} burrow{burrows === 1 ? '' : 's'}
         {sheltered ? ` · ${sheltered} underground` : ''}
+      </p>
+      {/* The water, as a population statistic: how much of the island's life
+          can currently use it, who is out there right now, and what that has
+          cost. Swimming is a gene a lineage has to arrive at (see
+          sim/water.js), so this line is where you watch it arrive. */}
+      <p className="text-xs text-neutral-400">
+        🌊 {swimmers} can swim
+        {drownings ? ` · ${drownings} drowned` : ''}
       </p>
       {latest ? (
         <div className="flex flex-col gap-2 rounded-sm border border-neutral-800 bg-neutral-950 p-2">
