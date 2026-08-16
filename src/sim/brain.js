@@ -6,9 +6,21 @@
 
 export const INPUT_SIZE = 7 // bias, energy, dx, dy, dist-to-apple, onWater, noise
 export const HIDDEN_SIZE = 8
-export const OUTPUT_SIZE = 5 // moveX, moveY, run, rest, reproduceDesire
+export const OUTPUT_SIZE = 6 // moveX, moveY, run, rest, reproduceDesire, searchDrive
+// Index of the searchDrive output within b2/w2 - called out by name because
+// createBrain nudges its initial bias (see below) and simulation.js reads it
+// as a genuine, evolvable "how eager am I to actively search when I can't
+// see food" trait rather than a hardcoded behavior.
+const SEARCH_DRIVE_OUTPUT = 5
 
 const WEIGHT_RANGE = 1.5
+// Freshly spawned brains start with searchDrive biased toward "yes" - real
+// rabbits spend most of their time actively foraging, not sitting still, so
+// that should be the default a genome has to evolve *away* from rather than
+// a coin flip it has to discover. Random mutation can still push any given
+// lineage's search drive down (or further up) over generations; this just
+// sets the starting prior. See docs/plans/issue-2-species-rabbits.md.
+const SEARCH_DRIVE_INITIAL_BIAS = 1.2
 
 function randWeight(rng) {
   return (rng() * 2 - 1) * WEIGHT_RANGE
@@ -25,6 +37,7 @@ export function createBrain(rng) {
   for (let i = 0; i < b1.length; i++) b1[i] = randWeight(rng)
   for (let i = 0; i < w2.length; i++) w2[i] = randWeight(rng)
   for (let i = 0; i < b2.length; i++) b2[i] = randWeight(rng)
+  b2[SEARCH_DRIVE_OUTPUT] += SEARCH_DRIVE_INITIAL_BIAS
   return { w1, b1, w2, b2 }
 }
 
@@ -62,6 +75,7 @@ export function think(brain, inputs) {
     run: sigmoid(out[2]),
     rest: sigmoid(out[3]),
     reproduceDesire: sigmoid(out[4]),
+    searchDrive: sigmoid(out[5]),
   }
 }
 

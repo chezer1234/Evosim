@@ -1,16 +1,18 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { TILE } from '../worldgen/mapgen.js'
 import { createSimulation, spawnRabbit, stepSimulation, isPlaceable, TICK_MS } from './simulation.js'
+import { INPUT_SIZE, HIDDEN_SIZE, OUTPUT_SIZE } from './brain.js'
 
 // A brain that ignores its inputs entirely (all weights/biases zero), so its
 // behaviour is fully predictable: moveX/moveY = tanh(0) = 0 (never moves),
-// run/rest/reproduceDesire = sigmoid(0) = 0.5 (never crosses the > 0.5 gates).
+// run/rest/reproduceDesire/searchDrive = sigmoid(0) = 0.5 (never crosses the
+// > 0.5 gates).
 function zeroBrain() {
   return {
-    w1: new Float32Array(7 * 8),
-    b1: new Float32Array(8),
-    w2: new Float32Array(8 * 5),
-    b2: new Float32Array(5),
+    w1: new Float32Array(INPUT_SIZE * HIDDEN_SIZE),
+    b1: new Float32Array(HIDDEN_SIZE),
+    w2: new Float32Array(HIDDEN_SIZE * OUTPUT_SIZE),
+    b2: new Float32Array(OUTPUT_SIZE),
   }
 }
 
@@ -135,10 +137,14 @@ describe('stepSimulation: energy depletion and death', () => {
 
   it('leaves a rabbit alive if it has energy left after the tick', () => {
     const sim = createSimulation(makeTestMap())
-    const rabbit = spawnRabbit(sim, 1, 1, zeroBrain(), 5)
+    // Energy stays above HUNGRY_ENERGY(65) throughout so the hunger
+    // override (see runDecisionTick) doesn't kick in and send this
+    // otherwise-inert zeroBrain rabbit walking toward the test map's apple -
+    // this test is only about depletion math, not foraging.
+    const rabbit = spawnRabbit(sim, 1, 1, zeroBrain(), 70)
     stepSimulation(sim, 2500)
     expect(rabbit.alive).toBe(true)
-    expect(rabbit.energy).toBe(4)
+    expect(rabbit.energy).toBe(69)
   })
 })
 
@@ -165,7 +171,14 @@ describe('stepSimulation: reproduction', () => {
     stepSimulation(sim, TICK_MS) // starts gestation
     expect(sim.rabbits.length).toBe(1)
 
-    stepSimulation(sim, 30000) // GESTATION_MS
+    // Land the birth on a 1ms final tick (see the newborn-energy test below
+    // for why): a child appended mid-iteration is walked by that same
+    // stepSimulation call too, and its mutated brain can now genuinely
+    // wander via search mode - fine in general play, but it would make this
+    // assertion about *where it was born* flaky if the birth and a chunk of
+    // the child's own subsequent movement landed in the same call.
+    stepSimulation(sim, 30000 - 1) // GESTATION_MS, just short of completing
+    stepSimulation(sim, 1) // completes gestation and spawns the child
     expect(sim.rabbits.length).toBe(2)
 
     const child = sim.rabbits.find((r) => r.generation === 1)

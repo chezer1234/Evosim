@@ -34,6 +34,7 @@ function buildInsightsData(sim) {
         alive: rabbit.alive,
         running: rabbit.running,
         resting: rabbit.resting,
+        searching: rabbit.searching,
         gestating: rabbit.gestating,
         brain: rabbit.brain,
         traits,

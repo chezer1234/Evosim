@@ -38,7 +38,7 @@ function Sparkline({ history, traitKey, color }) {
   )
 }
 
-const TREND_KEYS = ['foodDrive', 'boldness', 'broodiness']
+const TREND_KEYS = ['foodDrive', 'searchDrive', 'boldness', 'broodiness']
 
 const POP_CHART_W = 260
 const POP_CHART_H = 46
@@ -121,7 +121,7 @@ export default function RabbitInsights({ selected, history, population, generati
           <p className="text-xs text-neutral-400">
             {selected.alive ? `Energy ${selected.energy}/100` : 'Deceased'}
             {selected.gestating ? ' · expecting' : ''}
-            {selected.running ? ' · running' : selected.resting ? ' · resting' : ''}
+            {selected.searching ? ' · searching' : selected.running ? ' · running' : selected.resting ? ' · resting' : ''}
           </p>
           <div className="flex flex-col gap-1.5 rounded-sm border border-neutral-800 bg-neutral-950 p-2">
             {TRAIT_META.map((m) => (

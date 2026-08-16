@@ -45,7 +45,7 @@ function drawRabbits(ctx, sim, tilePx, ox, oy, startX, startY, endX, endY) {
     if (selected) drawVisionRadius(ctx, cx, cy, tilePx)
 
     ctx.beginPath()
-    ctx.fillStyle = rabbit.running ? 'rgb(255,255,255)' : rabbit.resting ? 'rgb(200,196,190)' : 'rgb(235,231,224)'
+    ctx.fillStyle = rabbit.searching ? 'rgb(125,211,252)' : rabbit.running ? 'rgb(255,255,255)' : rabbit.resting ? 'rgb(200,196,190)' : 'rgb(235,231,224)'
     ctx.arc(cx, cy, r, 0, Math.PI * 2)
     ctx.fill()
     ctx.lineWidth = Math.max(0.5, tilePx * 0.03)
