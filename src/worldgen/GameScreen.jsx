@@ -4,6 +4,7 @@ import { createSimulation, isPlaceable, spawnRabbit, stepSimulation } from '../s
 import { drawSimulation } from '../sim/render.js'
 import { computeTraits, describeEnergyEffects, describeTraits } from '../sim/brainInsight.js'
 import RabbitInsights from './RabbitInsights.jsx'
+import PopulationPanel from './PopulationPanel.jsx'
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v))
 
@@ -72,12 +73,17 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
   const [rabbitCount, setRabbitCount] = useState(0)
   const lastReportedCountRef = useRef(0)
 
-  // "Brains" insights panel: translates a rabbit's raw weights into
-  // plain-language traits (see sim/brainInsight.js). Snapshotted on a
-  // throttle from the sim ref rather than every frame, since it's cheap
-  // but there's no reason to recompute 60x/sec for a text panel.
+  // "Brains" and "Population" panels: translate the sim's raw state into
+  // plain-language traits/trends (see sim/brainInsight.js). Both are
+  // independent floating overlays (see render below) rather than layout
+  // siblings of the map, and both share one snapshot - built on a throttle
+  // from the sim ref rather than every frame, since it's cheap but there's
+  // no reason to recompute 60x/sec for a text panel - taken whenever either
+  // one is open.
   const showInsightsRef = useRef(false)
   const [showInsights, setShowInsights] = useState(false)
+  const showPopulationRef = useRef(false)
+  const [showPopulation, setShowPopulation] = useState(false)
   const [insightsData, setInsightsData] = useState(null)
   const lastInsightsUpdateRef = useRef(0)
   const INSIGHTS_UPDATE_MS = 400
@@ -94,6 +100,11 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
   const toggleInsights = useCallback(() => {
     showInsightsRef.current = !showInsightsRef.current
     setShowInsights(showInsightsRef.current)
+  }, [])
+
+  const togglePopulation = useCallback(() => {
+    showPopulationRef.current = !showPopulationRef.current
+    setShowPopulation(showPopulationRef.current)
   }, [])
 
   // Draws whatever the current view/pan/zoom is, at the given elapsed time
@@ -205,7 +216,7 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
           lastReportedCountRef.current = sim.rabbits.length
           setRabbitCount(sim.rabbits.length)
         }
-        if (showInsightsRef.current && now - lastInsightsUpdateRef.current >= INSIGHTS_UPDATE_MS) {
+        if ((showInsightsRef.current || showPopulationRef.current) && now - lastInsightsUpdateRef.current >= INSIGHTS_UPDATE_MS) {
           lastInsightsUpdateRef.current = now
           setInsightsData(buildInsightsData(sim))
         }
@@ -308,9 +319,13 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
     canvas.addEventListener('pointercancel', onPointerUp)
     // A ResizeObserver on the wrapper (rather than a window 'resize'
     // listener) also catches the wrap shrinking/growing from layout
-    // changes that aren't a window resize - e.g. the brains side panel
-    // opening/closing - which a window-only listener would miss, leaving
-    // the canvas's internal size out of sync with its new CSS size.
+    // changes that aren't a window resize (e.g. the toolbar wrapping to a
+    // second line on a narrow viewport), which a window-only listener
+    // would miss, leaving the canvas's internal size out of sync with its
+    // new CSS size. The brains/population panels are floating overlays
+    // (absolutely positioned over the canvas, not layout siblings of it)
+    // specifically so opening/closing them never triggers this at all -
+    // the map stays put and doesn't jump or re-clamp its pan/zoom.
     const ro = new ResizeObserver(onResize)
     ro.observe(wrap)
     canvas.style.cursor = 'grab'
@@ -396,6 +411,19 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
               🧠 Brains
             </button>
           ) : null}
+          {map ? (
+            <button
+              type="button"
+              onClick={togglePopulation}
+              className={
+                showPopulation
+                  ? 'rounded-sm border border-emerald-500 bg-emerald-500/20 px-3 py-1.5 text-xs font-semibold text-emerald-400 transition'
+                  : 'rounded-sm border border-neutral-700 bg-neutral-950 px-3 py-1.5 text-xs font-semibold transition hover:border-emerald-500 hover:text-emerald-400'
+              }
+            >
+              📈 Population
+            </button>
+          ) : null}
         </div>
         {map ? (
           <div className="flex flex-wrap items-center gap-4 text-xs text-neutral-400">
@@ -440,21 +468,27 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
           </div>
         ) : null}
       </div>
-      <div className="flex min-h-0 flex-1">
-        <div ref={wrapRef} className="relative flex min-h-0 flex-1 items-center justify-center p-5">
-          <canvas ref={canvasRef} className="touch-none rounded-sm bg-[#16324a] shadow-2xl shadow-black/40" />
-          <p className="pointer-events-none absolute bottom-3 left-1/2 -translate-x-1/2 text-[11px] text-neutral-500">
-            {placing ? 'Click a tile to place a rabbit' : 'Scroll to zoom · Drag to pan · Click a rabbit to inspect it'}
-          </p>
-        </div>
+      <div ref={wrapRef} className="relative flex min-h-0 flex-1 items-center justify-center p-5">
+        <canvas ref={canvasRef} className="touch-none rounded-sm bg-[#16324a] shadow-2xl shadow-black/40" />
+        <p className="pointer-events-none absolute bottom-3 left-1/2 -translate-x-1/2 text-[11px] text-neutral-500">
+          {placing ? 'Click a tile to place a rabbit' : 'Scroll to zoom · Drag to pan · Click a rabbit to inspect it'}
+        </p>
+        {/* Overlaid on top of the map (not laid out beside it) so opening
+            either panel never resizes or shifts the canvas underneath. */}
+        {showPopulation ? (
+          <div className="pointer-events-none absolute top-3 left-3 max-h-[calc(100%-1.5rem)]">
+            <PopulationPanel
+              population={insightsData?.population ?? rabbitCount}
+              history={insightsData?.history ?? []}
+              generationRange={insightsData?.generationRange ?? null}
+              onClose={togglePopulation}
+            />
+          </div>
+        ) : null}
         {showInsights ? (
-          <RabbitInsights
-            selected={insightsData?.selected ?? null}
-            history={insightsData?.history ?? []}
-            population={insightsData?.population ?? rabbitCount}
-            generationRange={insightsData?.generationRange ?? null}
-            onClose={toggleInsights}
-          />
+          <div className="pointer-events-none absolute top-3 right-3 max-h-[calc(100%-1.5rem)]">
+            <RabbitInsights selected={insightsData?.selected ?? null} onClose={toggleInsights} />
+          </div>
         ) : null}
       </div>
     </main>
