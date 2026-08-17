@@ -2,8 +2,9 @@
 // ./net.js, shared with the fox's brain - see ./foxBrain.js). No training or
 // backprop here: weights are randomized at spawn, and a child inherits its
 // parent's weights with small random mutations. Selection happens implicitly
-// through who survives and reproduces - see
-// docs/plans/issue-2-species-rabbits.md for the reasoning.
+// through who survives and reproduces: a brain that finds food and avoids
+// foxes leaves more copies of itself, and nothing else in here has an
+// opinion about which weights are good ones.
 
 import { createNet, forward, mutateNet, sigmoid } from './net.js'
 
@@ -31,7 +32,7 @@ const HIDE_OUTPUT = 7
 // that should be the default a genome has to evolve *away* from rather than
 // a coin flip it has to discover. Random mutation can still push any given
 // lineage's search drive down (or further up) over generations; this just
-// sets the starting prior. See docs/plans/issue-2-species-rabbits.md.
+// sets the starting prior.
 // Raised from 1.2 alongside the four inputs issue #14 added: a wider input
 // layer drives the hidden units harder, so their (random) contribution to
 // each output grew and a fixed bias bought a weaker prior than it used to.

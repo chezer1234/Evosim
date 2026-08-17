@@ -10,9 +10,8 @@
 // direction - a crab is a third of a rabbit and takes as long to eat - which
 // is exactly what makes it a fallback rather than a replacement.
 //
-// Both species now think with a neural net - rabbits via ./brain.js (see
-// docs/plans/issue-2-species-rabbits.md), foxes via ./foxBrain.js (see
-// docs/plans/fox-neural-nets.md) - and both also carry an explicit gene
+// Rabbits and foxes both think with a neural net - rabbits via ./brain.js,
+// foxes via ./foxBrain.js - and both also carry an explicit gene
 // vector for the parts of an animal a weight matrix cannot express: the
 // rabbit's ears, voice and swim skill (./rabbit.js) and the fox's whole
 // body (./fox.js). Movement is discrete tile-stepping either way - rabbits
