@@ -115,6 +115,13 @@ components aren't covered; `sim/render.test.js` is the one rendering exception, 
 the draw path against a recording canvas stub to pin down *which* animation a creature
 gets and that sprites are drawn at their interpolated position.
 
+**Seed anything that runs the sim or the map generator.** Both draw from `Math.random` —
+search headings, brain noise, mutation, catch rolls, the map seed itself — so a test that
+steps the world for a few seconds and asserts an outcome is sampling, not deciding. The
+sim test files pin `Math.random` to a fixed stream in a `beforeEach` and restore it after;
+do the same rather than leaving a test that fails once every twenty runs for reasons
+nobody can reproduce.
+
 ### Balance: the ecosystem harness
 
 Unit tests pin one mechanic each; they cannot tell you whether the island still has

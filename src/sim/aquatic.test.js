@@ -3,8 +3,8 @@
 // gets a meal out of them. The genes themselves are covered in fish.test.js
 // and crab.test.js; the tile-by-tile rules they add up to are here.
 
-import { describe, it, expect } from 'vitest'
-import { TILE } from '../worldgen/mapgen.js'
+import { describe, it, expect, afterEach, beforeEach } from 'vitest'
+import { mulberry32, TILE } from '../worldgen/mapgen.js'
 import {
   createSimulation,
   isPlaceableFor,
@@ -57,6 +57,19 @@ function makeChannelMap(size = 20) {
 function runFor(sim, ms) {
   for (let elapsed = 0; elapsed < ms; elapsed += TICK_MS) stepSimulation(sim, TICK_MS)
 }
+
+// Fixed random stream, for the same reason simulation.test.js pins one: half
+// of what happens below is a roll - where a fish wanders, whether a grab
+// connects - and a reproducible run is worth more than an unseeded one that
+// fails once a fortnight.
+let realRandom
+beforeEach(() => {
+  realRandom = Math.random
+  Math.random = mulberry32(20250817)
+})
+afterEach(() => {
+  Math.random = realRandom
+})
 
 function fishGenes(overrides = {}) {
   const g = {}
