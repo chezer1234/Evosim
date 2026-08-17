@@ -9,9 +9,11 @@
 
 import { describe, it, expect } from 'vitest'
 import { TILE } from '../worldgen/mapgen.js'
-import { createSimulation, spawnFox, spawnRabbit } from './simulation.js'
+import { createSimulation, spawnCrab, spawnFish, spawnFox, spawnRabbit } from './simulation.js'
 import { RABBIT_GENE_KEYS } from './rabbit.js'
 import { FOX_GENE_KEYS } from './fox.js'
+import { FISH_GENE_KEYS } from './fish.js'
+import { CRAB_GENE_KEYS } from './crab.js'
 import { drawSimulation } from './render.js'
 
 function stubCtx() {
@@ -51,6 +53,14 @@ function stubCtx() {
     createRadialGradient() {
       return { addColorStop() {} }
     },
+    createLinearGradient() {
+      return { addColorStop() {} }
+    },
+    measureText() {
+      return { width: 20 }
+    },
+    roundRect() {},
+    fillText() {},
   }
   return ctx
 }
@@ -130,5 +140,49 @@ describe('drawSimulation', () => {
     const rabbit = spawnRabbit(sim, 1, 4, null, 100, 0, genes(RABBIT_GENE_KEYS, { swimming: 0 }))
     rabbit.burrowId = 1
     expect(draw(sim).arc).toHaveLength(0)
+  })
+
+  it('draws a fish under the surface rather than on it - no waterline, no shadow', () => {
+    // The one creature in the sim that is not a land animal having a bad
+    // time in the water: it gets neither the clip nor the ground shadow the
+    // other two do (see drawFish).
+    const sim = createSimulation(makeMap())
+    spawnFish(sim, 4, 4, genes(FISH_GENE_KEYS))
+    const calls = draw(sim)
+    expect(calls.clip).toBe(0)
+    expect(calls.fills.some((f) => typeof f === 'string' && f.startsWith('rgba(20,16,10'))).toBe(false)
+    expect(calls.ellipse.length).toBeGreaterThan(0) // the body
+  })
+
+  it('gives a crab on the sand a shadow and one in the water none', () => {
+    const ashore = createSimulation(makeMap())
+    spawnCrab(ashore, 2, 4, genes(CRAB_GENE_KEYS))
+    expect(draw(ashore).fills).toContain('rgba(20,16,10,0.22)')
+
+    const afloat = createSimulation(makeMap())
+    spawnCrab(afloat, 4, 4, genes(CRAB_GENE_KEYS))
+    expect(draw(afloat).fills).not.toContain('rgba(20,16,10,0.22)')
+  })
+
+  it('draws every species as a dot in the atlas view without touching a sprite', () => {
+    // The zoomed-right-out path, which has its own loop over each population
+    // (see drawPopulationOverview) and would otherwise only ever be exercised
+    // by scrolling out on a big world by hand.
+    const size = 128
+    const tileType = new Uint8Array(size * size).fill(TILE.GRASS)
+    for (let y = 0; y < size; y++) {
+      for (let x = 60; x <= 70; x++) tileType[y * size + x] = TILE.LAKE
+    }
+    const map = { size, tileType, canHaveApple: new Uint8Array(size * size) }
+    const sim = createSimulation(map)
+    spawnRabbit(sim, 10, 10, null, 100, 0, genes(RABBIT_GENE_KEYS, { swimming: 0 }))
+    spawnFox(sim, 12, 10, genes(FOX_GENE_KEYS, { swimming: 0 }), 100)
+    spawnFish(sim, 65, 10, genes(FISH_GENE_KEYS))
+    spawnCrab(sim, 65, 12, genes(CRAB_GENE_KEYS))
+
+    const ctx = stubCtx()
+    drawSimulation(ctx, map, sim, 4, { originX: 0, originY: 0, width: 512, height: 512 })
+
+    expect(ctx.calls.arc).toHaveLength(4) // one dot each, and nothing else
   })
 })

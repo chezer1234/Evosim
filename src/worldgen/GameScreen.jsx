@@ -1,13 +1,25 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { drawMap } from './mapgen.js'
-import { createSimulation, islandPopulations, isPlaceable, selectCreature, spawnFox, spawnRabbit, stepSimulation } from '../sim/simulation.js'
+import {
+  createSimulation,
+  islandPopulations,
+  isPlaceableFor,
+  selectCreature,
+  spawnCrab,
+  spawnFish,
+  spawnFox,
+  spawnRabbit,
+  stepSimulation,
+} from '../sim/simulation.js'
 import { drawSimulation } from '../sim/render.js'
 import { computeTraits, describeEnergyEffects, describeTraits } from '../sim/brainInsight.js'
 import { foxStats } from '../sim/fox.js'
 import { computeFoxTraits, describeFoxBrain, describeFoxDrives } from '../sim/foxInsight.js'
 import { describeRabbitSenses } from '../sim/rabbit.js'
+import { isWaterType } from './mapgen.js'
 import RabbitInsights from './RabbitInsights.jsx'
 import FoxInsights from './FoxInsights.jsx'
+import AquaticInsights from './AquaticInsights.jsx'
 import PopulationPanel from './PopulationPanel.jsx'
 import ExpandedChart from './ExpandedChart.jsx'
 import SpawnPalette from './SpawnPalette.jsx'
@@ -39,10 +51,30 @@ function generationRangeOf(creatures) {
   return [minGen, maxGen]
 }
 
+/** The shoreline species, flattened for the panel: genes and a status, and
+ * nothing else, because that is all a fish or a crab has (see
+ * AquaticInsights.jsx). */
+function buildAquaticSelection(sim, kind, list) {
+  const creature = list.find((c) => c.id === sim.selectedId)
+  if (!creature) return null
+  return {
+    kind,
+    id: creature.id,
+    generation: creature.generation,
+    energy: creature.energy,
+    alive: creature.alive,
+    genes: creature.genes,
+    fleeing: creature.fleeing,
+    shoaling: !!creature.shoaling,
+    ashore: !isWaterType(sim.map.tileType[creature.y * sim.map.size + creature.x]),
+  }
+}
+
 /** Snapshot the sim into plain data for the inspector/population panels: the
- * selected creature (rabbit *or* fox) plus both populations' trend history.
- * Plain data rather than live entity refs, so React re-renders off a stable
- * value instead of an object the sim loop keeps mutating underneath it. */
+ * selected creature (of whichever species) plus every population's trend
+ * history. Plain data rather than live entity refs, so React re-renders off a
+ * stable value instead of an object the sim loop keeps mutating underneath
+ * it. */
 function buildInsightsData(sim) {
   const rabbits = sim.rabbits
   const foxes = sim.foxes
@@ -102,8 +134,12 @@ function buildInsightsData(sim) {
         floundering: fox.floundering,
         gestating: fox.gestating,
         kills: fox.kills,
+        catches: fox.catches,
+        foraging: fox.foraging,
       }
     }
+  } else if (sim.selectedId != null && (sim.selectedKind === 'fish' || sim.selectedKind === 'crab')) {
+    selected = buildAquaticSelection(sim, sim.selectedKind, sim.selectedKind === 'fish' ? sim.fish : sim.crabs)
   }
 
   const spread = islandPopulations(sim)
@@ -114,7 +150,10 @@ function buildInsightsData(sim) {
     fullHistory: sim.fullHistory,
     population: rabbits.length,
     foxPopulation: foxes.length,
+    fishPopulation: sim.fish.length,
+    crabPopulation: sim.crabs.length,
     kills: sim.kills,
+    shoreCatches: sim.shoreCatches,
     burrows: sim.burrows.length,
     sheltered: rabbits.filter((r) => r.burrowId != null).length,
     // Counted across both species: "how much of what is alive out there can
@@ -140,42 +179,56 @@ function buildInsightsData(sim) {
   }
 }
 
-const SPAWN_SEARCH_RADIUS = 6
+// Wide enough that a click on a beach still finds water for a fish, and a
+// click on a hilltop still finds the shore for a crab. It used to only have
+// to dodge the odd lake.
+const SPAWN_SEARCH_RADIUS = 10
 
-/** Up to `count` placeable tiles, ring by ring outward from (tx, ty) - so a
- * x10 drop lands as a little colony rather than ten creatures stacked on one
- * square. Falls short (or returns nothing) if the area really is all water. */
-function placeableTilesNear(map, tx, ty, count) {
+/** Up to `count` tiles this species can live on, ring by ring outward from
+ * (tx, ty) - so a x10 drop lands as a little colony rather than ten creatures
+ * stacked on one square, and a fish dropped on dry land goes in the nearest
+ * water rather than nowhere. Falls short (or returns nothing) if there is no
+ * such tile within reach. */
+function placeableTilesNear(map, species, tx, ty, count) {
   const tiles = []
   for (let radius = 0; radius <= SPAWN_SEARCH_RADIUS && tiles.length < count; radius++) {
     for (let dy = -radius; dy <= radius && tiles.length < count; dy++) {
       for (let dx = -radius; dx <= radius && tiles.length < count; dx++) {
         if (Math.max(Math.abs(dx), Math.abs(dy)) !== radius) continue
-        if (isPlaceable(map, tx + dx, ty + dy)) tiles.push([tx + dx, ty + dy])
+        if (isPlaceableFor(map, species, tx + dx, ty + dy)) tiles.push([tx + dx, ty + dy])
       }
     }
   }
   return tiles
 }
 
-/** Random placeable tiles anywhere on the island, for the palette's scatter
- * button. Rejection sampling with a bounded attempt count, since the ratio of
- * land to ocean varies wildly between generated maps. */
-function scatterTiles(map, count) {
+/** Random tiles anywhere in this species' habitat, for the palette's scatter
+ * button. Rejection sampling with a bounded attempt count, since the share of
+ * a map that is land, lake or shoreline varies wildly between worlds - the
+ * budget is generous because the shallows are a thin band of most of them. */
+function scatterTiles(map, species, count) {
   const tiles = []
-  for (let attempts = 0; attempts < count * 200 && tiles.length < count; attempts++) {
+  for (let attempts = 0; attempts < count * 800 && tiles.length < count; attempts++) {
     const x = Math.floor(Math.random() * map.size)
     const y = Math.floor(Math.random() * map.size)
-    if (isPlaceable(map, x, y)) tiles.push([x, y])
+    if (isPlaceableFor(map, species, x, y)) tiles.push([x, y])
   }
   return tiles
 }
 
+const SPAWNERS = { rabbit: spawnRabbit, fox: spawnFox, fish: spawnFish, crab: spawnCrab }
+
+// "3 foxes", "3 fish" - English does not pluralize any two of these species
+// the same way, so the plurals are spelled out rather than derived.
+const PLURALS = { rabbit: 'rabbits', fox: 'foxes', fish: 'fish', crab: 'crabs' }
+
+function pluralSpecies(species, count) {
+  return count === 1 ? species : (PLURALS[species] ?? `${species}s`)
+}
+
 function spawnAt(sim, species, tiles) {
-  for (const [x, y] of tiles) {
-    if (species === 'fox') spawnFox(sim, x, y)
-    else spawnRabbit(sim, x, y)
-  }
+  const spawn = SPAWNERS[species] ?? spawnRabbit
+  for (const [x, y] of tiles) spawn(sim, x, y)
 }
 
 const TOOLBAR_BUTTON = 'rounded-sm border border-neutral-700 bg-neutral-950 px-4 py-2 text-sm font-semibold transition hover:border-emerald-500 hover:text-emerald-400'
@@ -279,8 +332,8 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
   // otherwise close over a stale species/count.
   const spawnRef = useRef({ open: false, species: 'rabbit', count: 1 })
   const [spawn, setSpawn] = useState({ open: false, species: 'rabbit', count: 1 })
-  const [counts, setCounts] = useState({ rabbits: 0, foxes: 0, kills: 0 })
-  const lastReportedCountsRef = useRef({ rabbits: 0, foxes: 0, kills: 0 })
+  const [counts, setCounts] = useState({ rabbits: 0, foxes: 0, fish: 0, crabs: 0, kills: 0 })
+  const lastReportedCountsRef = useRef({ rabbits: 0, foxes: 0, fish: 0, crabs: 0, kills: 0 })
 
   // "Brains" and "Population" panels: translate the sim's raw state into
   // plain-language traits/trends (see sim/brainInsight.js). On a roomy
@@ -311,8 +364,8 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
 
   useEffect(() => {
     simRef.current = map ? createSimulation(map) : null
-    lastReportedCountsRef.current = { rabbits: 0, foxes: 0, kills: 0 }
-    setCounts({ rabbits: 0, foxes: 0, kills: 0 })
+    lastReportedCountsRef.current = { rabbits: 0, foxes: 0, fish: 0, crabs: 0, kills: 0 }
+    setCounts({ rabbits: 0, foxes: 0, fish: 0, crabs: 0, kills: 0 })
     setInsightsData(null)
     pausedRef.current = false
     setPaused(false)
@@ -363,7 +416,7 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
     const sim = simRef.current
     if (!sim || !map) return
     const { species, count } = spawnRef.current
-    spawnAt(sim, species, scatterTiles(map, count))
+    spawnAt(sim, species, scatterTiles(map, species, count))
   }, [map])
 
   const toggleInsights = useCallback(() => {
@@ -544,8 +597,20 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
         // when you spawn creatures and tap one to read it, and neither the
         // counters nor the panels should sit stale until you press play.
         const last = lastReportedCountsRef.current
-        if (sim.rabbits.length !== last.rabbits || sim.foxes.length !== last.foxes || sim.kills !== last.kills) {
-          lastReportedCountsRef.current = { rabbits: sim.rabbits.length, foxes: sim.foxes.length, kills: sim.kills }
+        if (
+          sim.rabbits.length !== last.rabbits ||
+          sim.foxes.length !== last.foxes ||
+          sim.fish.length !== last.fish ||
+          sim.crabs.length !== last.crabs ||
+          sim.kills !== last.kills
+        ) {
+          lastReportedCountsRef.current = {
+            rabbits: sim.rabbits.length,
+            foxes: sim.foxes.length,
+            fish: sim.fish.length,
+            crabs: sim.crabs.length,
+            kills: sim.kills,
+          }
           setCounts(lastReportedCountsRef.current)
         }
         if ((showInsightsRef.current || showPopulationRef.current) && now - lastInsightsUpdateRef.current >= INSIGHTS_UPDATE_MS) {
@@ -642,7 +707,7 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
         const tx = Math.floor(tileX)
         const ty = Math.floor(tileY)
         const { species, count } = spawnRef.current
-        spawnAt(sim, species, placeableTilesNear(map, tx, ty, count))
+        spawnAt(sim, species, placeableTilesNear(map, species, tx, ty, count))
         return
       }
 
@@ -651,7 +716,11 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
       // Must tap reasonably close to something to select it - a fingertip
       // gets a wider radius than a mouse pointer (see selectRadiusTiles).
       let bestDist = selectRadiusTiles(e.pointerType, v.tilePx)
-      for (const [kind, list] of [['rabbit', sim.rabbits], ['fox', sim.foxes]]) {
+      // Ties go to whichever species is listed first (the test below is a
+      // strict <), so the two with a brain to read go first: on a crowded
+      // shoreline, a tap that could mean either picks the fox rather than the
+      // crab it is standing next to.
+      for (const [kind, list] of [['rabbit', sim.rabbits], ['fox', sim.foxes], ['fish', sim.fish], ['crab', sim.crabs]]) {
         for (const c of list) {
           if (!c.alive) continue
           const d = Math.hypot(c.x + 0.5 - tileX, c.y + 0.5 - tileY)
@@ -771,7 +840,7 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
   }
 
   const hint = spawn.open
-    ? `${touch ? 'Tap' : 'Click'} a tile to place ${spawn.count} ${spawn.species}${spawn.count === 1 ? '' : spawn.species === 'fox' ? 'es' : 's'}`
+    ? `${touch ? 'Tap' : 'Click'} a tile to place ${spawn.count} ${pluralSpecies(spawn.species, spawn.count)}`
     : touch
       ? 'Pinch to zoom · Tap a creature'
       : 'Scroll to zoom · Drag to pan · Click a creature to inspect it'
@@ -796,6 +865,18 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
       <span>
         🦊 <b className="font-mono text-neutral-100 tabular-nums">{counts.foxes}</b>
       </span>
+      {/* Only once there is something in the water: an island with no
+          shoreline life on it should not carry two permanent zeroes. */}
+      {counts.fish ? (
+        <span>
+          🐟 <b className="font-mono text-neutral-100 tabular-nums">{counts.fish}</b>
+        </span>
+      ) : null}
+      {counts.crabs ? (
+        <span>
+          🦀 <b className="font-mono text-neutral-100 tabular-nums">{counts.crabs}</b>
+        </span>
+      ) : null}
       <span>
         {compact ? '🍽' : 'Caught'} <b className="font-mono text-red-400 tabular-nums">{counts.kills}</b>
       </span>
@@ -933,7 +1014,10 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
             <PopulationPanel
               population={insightsData?.population ?? counts.rabbits}
               foxPopulation={insightsData?.foxPopulation ?? counts.foxes}
+              fishPopulation={insightsData?.fishPopulation ?? counts.fish}
+              crabPopulation={insightsData?.crabPopulation ?? counts.crabs}
               kills={insightsData?.kills ?? counts.kills}
+              shoreCatches={insightsData?.shoreCatches ?? 0}
               burrows={insightsData?.burrows ?? 0}
               sheltered={insightsData?.sheltered ?? 0}
               swimmers={insightsData?.swimmers ?? 0}
@@ -963,6 +1047,8 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
           <div className={slots.inspector}>
             {insightsData?.selected?.kind === 'fox' ? (
               <FoxInsights selected={insightsData.selected} onClose={toggleInsights} />
+            ) : insightsData?.selected?.kind === 'fish' || insightsData?.selected?.kind === 'crab' ? (
+              <AquaticInsights selected={insightsData.selected} onClose={toggleInsights} />
             ) : (
               <RabbitInsights selected={insightsData?.selected ?? null} onClose={toggleInsights} />
             )}

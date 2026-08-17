@@ -27,9 +27,12 @@ export const FOX_INPUT_LABELS = [
   'Pack distance',
   'Stamina left',
   'Under cover',
+  'Shore prey direction (x)',
+  'Shore prey direction (y)',
+  'Shore prey distance',
   'Randomness',
 ]
-export const FOX_OUTPUT_LABELS = ['Chase', 'Sprint', 'Follow scent', 'Join the pack', 'Lie up', 'Want to breed']
+export const FOX_OUTPUT_LABELS = ['Chase', 'Sprint', 'Follow scent', 'Join the pack', 'Lie up', 'Want to breed', 'Work the shore']
 
 // Input/output indices, kept in sync with buildFoxInputs in simulation.js
 // and foxThink()'s output shape in foxBrain.js.
@@ -47,9 +50,12 @@ const IN = {
   PACK_DIST: 10,
   STAMINA: 11,
   COVER: 12,
-  NOISE: 13,
+  SHORE_X: 13,
+  SHORE_Y: 14,
+  SHORE_DIST: 15,
+  NOISE: 16,
 }
-const OUT = { CHASE: 0, SPRINT: 1, TRACK: 2, GROUP: 3, REST: 4, BREED: 5 }
+const OUT = { CHASE: 0, SPRINT: 1, TRACK: 2, GROUP: 3, REST: 4, BREED: 5, FORAGE: 6 }
 
 /** pathways[input][output] = signed net pull of that input on that output,
  * summed across the hidden layer. */
@@ -84,6 +90,7 @@ export const FOX_TRAIT_META = [
   { key: 'idleness', label: 'Lies up to save energy', color: 'rgb(96,165,250)' },
   { key: 'broodiness', label: 'Broodiness', color: 'rgb(244,114,182)' },
   { key: 'patience', label: 'Hunts only when hungry', color: 'rgb(250,204,21)' },
+  { key: 'beachcombing', label: 'Works the shoreline', color: 'rgb(45,212,191)' },
 ]
 
 /**
@@ -114,6 +121,12 @@ export function computeFoxTraits(brain) {
     // is the behaviour the bloodlust gene used to hardcode at one value per
     // fox.
     patience: squash(-p[IN.ENERGY][OUT.CHASE]),
+    // Whether this lineage bothers with the tideline at all. It is the
+    // cheapest food on the map and the least of it, so a pack that leans on
+    // it is a pack that has decided small and certain beats large and
+    // occasional - which is exactly the decision an island with no rabbits
+    // left on it forces.
+    beachcombing: squash(p[IN.BIAS][OUT.FORAGE]),
     _pathways: p,
   }
 }
@@ -131,8 +144,9 @@ export function describeFoxBrain(t) {
     t.commitment > 0.5 ? 'commits to a sprint' : 'rarely spends stamina on a chase',
     t.sociability > 0.5 ? 'runs with the pack' : 'keeps to itself',
     t.idleness > 0.5 ? 'lies up between meals to save energy' : 'stays on the move',
+    t.beachcombing > 0.5 ? 'It works the tideline for fish and crabs as well as hunting' : 'It walks past the shoreline without looking at it',
   ]
-  return `This fox ${parts[0]}, ${parts[1]}. It ${parts[2]}, ${parts[3]}, ${parts[4]}, and ${parts[5]}. Its ${levelWord(t.broodiness)} broodiness decides how readily it turns a full belly into cubs.`
+  return `This fox ${parts[0]}, ${parts[1]}. It ${parts[2]}, ${parts[3]}, ${parts[4]}, and ${parts[5]}. ${parts[6]}. Its ${levelWord(t.broodiness)} broodiness decides how readily it turns a full belly into cubs.`
 }
 
 /** Short "why it acts this way" notes: how its own state modulates the three
@@ -161,6 +175,12 @@ export function describeFoxDrives(t) {
       'Saves its sprint for prey that is still a long way off.',
       'Holds its sprint until the rabbit is close, then spends it.',
       'Sprints without much regard for range.',
+    ),
+    shore: note(
+      p[IN.ENERGY][OUT.FORAGE],
+      'Picks crabs up when it is already full - a habit rather than a fallback.',
+      'Turns to the tideline as its reserves run down, and hunts properly while they last.',
+      'Takes whatever the shoreline offers, full or empty.',
     ),
   }
 }

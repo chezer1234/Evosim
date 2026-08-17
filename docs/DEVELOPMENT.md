@@ -33,6 +33,13 @@ src/
                      call carries, and what those map to in tiles
     fox.js           The fox's *body*: named 0..1 genes, their mutation, and the sim
                      units they map to (speed, vision & nose, camouflage, metabolism, …)
+    shallows.js      The second food chain's terrain: which water is sunlit, how far
+                     a tile is from water, and the forage (algae/wrack) that grows on
+                     the fringe of it
+    fish.js          The fish genome: speed, shoaling, wariness, fecundity. No brain -
+                     see the header for why the bottom of a food chain shouldn't think
+    crab.js          The crab genome: boldness (how far up the shore it will feed),
+                     armour, speed, fecundity
     burrow.js        The warren: capacity, digging rules, and the tunnel network
                      rabbits can move through (framework-agnostic, pure functions)
     water.js         Swimming: the shared skill curve behind both species' swim
@@ -42,19 +49,21 @@ src/
     motion.js        The visual layer over the tile grid: interpolated positions,
                      hop/glide easing, and the pose (lift, shadow, stride, stroke)
                      the renderer draws each frame
-    simulation.js    Entity state, both species' per-tick decision loops, predation,
-                     hearing/alarm calls, scent, sheltering, energy/lifecycle, breeding
+    simulation.js    Entity state, every species' per-tick decision loops, predation,
+                     hearing/alarm calls, scent, sheltering, foraging the tideline,
+                     energy/lifecycle, breeding
     brainInsight.js  Derives human-readable trait summaries from a rabbit's raw weights
     foxInsight.js    The same for a fox's brain: aggression, nose for prey, idleness…
-    render.js        Draws rabbits, foxes and burrows onto the map canvas - two
-                     distinct animations per species, on land and in the water
+    render.js        Draws all four species, burrows and both larders onto the map
+                     canvas - two distinct animations per land species, on land and in
+                     the water, and a fish drawn *under* the surface rather than on it
 scripts/
   ecosystem.mjs     Headless, seeded balance harness - runs the real sim across a batch
                      of islands and reports what happened to each species
 ```
 
-Both species are modelled the same way, in two halves: an **explicit gene vector** for
-the parts of an animal a weight matrix cannot express (ear size is hardware, not an
+Rabbits and foxes are modelled the same way, in two halves: an **explicit gene vector**
+for the parts of an animal a weight matrix cannot express (ear size is hardware, not an
 opinion), and an **opaque neural net** for its decisions, which has to be *interpreted*
 for the UI (`brainInsight.js`, `foxInsight.js`). A rabbit's genes are its senses; a
 fox's are its whole body. See
@@ -65,7 +74,14 @@ fox genome started out. Also see
 [`docs/plans/issue-14-rabbit-survival.md`](plans/issue-14-rabbit-survival.md), which
 also covers the predator/prey rebalance and the burrow model.
 
-Swimming is a gene in the same sense, shared by both species (`water.js`), and the
+The **fish and the crabs are deliberately only the first half** — a gene vector and no
+net at all. They are the bottom of the second food chain, and a bottom that thinks as
+hard as its predators do can out-evolve them; what a shoal can evolve instead is being
+quicker and twitchier, and what a crab population evolves is how far from the water it
+dares to feed. See [`docs/plans/aquatic-life.md`](plans/aquatic-life.md) for the whole
+argument, the fox's `forage` output, and the balance numbers.
+
+Swimming is a gene in the same sense, shared by both land species (`water.js`), and the
 one place where the *drawing* of a creature diverges completely from its land pose.
 It is also the only way a population ever leaves the island it was born on: see
 [`docs/plans/big-worlds-islands-biomes.md`](plans/big-worlds-islands-biomes.md) for
@@ -96,7 +112,7 @@ make check        # lint + test + build, i.e. everything CI does
 
 `make help` lists every target.
 
-Tests live alongside the source they cover (`*.test.js`) and run on [Vitest](https://vitest.dev). They focus on the pure logic — map-generation invariants, both species' forward pass and mutation (`brain.test.js`, `foxBrain.test.js`), the fox's body genes (mutation bounds, founder weighting, and every gene's mapping to sim units), the rabbit's sense genes and burrow model, the rabbit lifecycle (movement bounds, eating, energy depletion/death, reproduction), predation (hunting, pouncing, fleeing, camouflage, forest cover, pack behaviour), the fox's brain-driven decisions (chasing, tracking a scent, lying up, breeding), the issue #14 survival kit (hearing beyond sight, alarm calls between rabbits, digging/capacity/sheltering), swimming (both thresholds, pace/energy curves, drowning, floundering back to shore, and crossing — or failing to cross — to another island), biome classification and the climate model (`worldgen/biomes.test.js`), island labelling and strait detection (`worldgen/islands.test.js`), the motion layer's interpolation and poses, and the map view's pan/zoom/pinch maths (`worldgen/viewport.js`) — since that's the code with real behavior to get wrong.
+Tests live alongside the source they cover (`*.test.js`) and run on [Vitest](https://vitest.dev). They focus on the pure logic — map-generation invariants, both species' forward pass and mutation (`brain.test.js`, `foxBrain.test.js`), the fox's body genes (mutation bounds, founder weighting, and every gene's mapping to sim units), the rabbit's sense genes and burrow model, the rabbit lifecycle (movement bounds, eating, energy depletion/death, reproduction), predation (hunting, pouncing, fleeing, camouflage, forest cover, pack behaviour), the fox's brain-driven decisions (chasing, tracking a scent, lying up, breeding), the issue #14 survival kit (hearing beyond sight, alarm calls between rabbits, digging/capacity/sheltering), swimming (both thresholds, pace/energy curves, drowning, floundering back to shore, and crossing — or failing to cross — to another island), the shoreline food chain (`fish.test.js`, `crab.test.js` for the two genomes, `shallows.test.js` for which water grows anything and where the tideline is, `aquatic.test.js` for the behaviour it adds up to — habitats nothing strays out of, a fox fishing from the bank, and the hunger override that makes it eat what it can get), biome classification and the climate model (`worldgen/biomes.test.js`), island labelling and strait detection (`worldgen/islands.test.js`), the motion layer's interpolation and poses, and the map view's pan/zoom/pinch maths (`worldgen/viewport.js`) — since that's the code with real behavior to get wrong.
 
 `sim/render.test.js` is the one exception to "rendering isn't covered": it runs the draw path against a recording canvas stub to pin down the *choice* between the land and water animations (shadow versus waterline clip) and that sprites are drawn at their interpolated position, not their tile. React components still aren't covered.
 
@@ -111,7 +127,9 @@ species:
 make ecosystem              # 5 rabbits, 5 foxes, 15 sim-minutes, 8 seeds
 make ecosystem-scatter      # the headline scenario, 20 seeds
 make ecosystem-boom         # heavier prey seeding, where predators can overshoot
-npm run ecosystem -- --rabbits 20 --foxes 5 --minutes 20 --runs 12 --seed 40
+make ecosystem-shore        # foxes, fish and crabs and no rabbits at all
+make ecosystem-full         # all four species on one island
+npm run ecosystem -- --rabbits 20 --foxes 5 --fish 25 --crabs 25 --minutes 20 --runs 12 --seed 40
 npm run ecosystem -- --json # machine-readable, for diffing two branches
 ```
 
@@ -123,14 +141,17 @@ interesting run with `npm run ecosystem -- --seed <n> --runs 1`.
 
 **Run it for anything touching energy, breeding, the senses or the decision loops.**
 It is what caught the fox rebalance overshooting, a regression where peacetime digging
-cut the rabbits' no-fox carrying capacity by two thirds, and an alarm-relay loop that
-kept whole warrens underground until they starved. `src/sim/ecosystem.test.js` runs a
+cut the rabbits' no-fox carrying capacity by two thirds, an alarm-relay loop that
+kept whole warrens underground until they starved, and a shoreline whose fish doubled
+every few seconds until they hit their ceiling before the first minute was out. `src/sim/ecosystem.test.js` runs a
 small seeded batch in CI, so "the foxes all died again" is now a test failure rather
 than something you notice by eye a month later; its assertions are deliberately loose,
-guarding against collapse rather than pinning today's numbers. See
-[`docs/plans/fox-neural-nets.md`](plans/fox-neural-nets.md) and
-[`docs/plans/issue-14-rabbit-survival.md`](plans/issue-14-rabbit-survival.md) for the
-numbers it has produced.
+guarding against collapse rather than pinning today's numbers — including the two the
+shoreline exists to satisfy: an island with a living shore still supports its rabbits,
+and an island with **no rabbits at all** still supports its foxes. See
+[`docs/plans/fox-neural-nets.md`](plans/fox-neural-nets.md),
+[`docs/plans/issue-14-rabbit-survival.md`](plans/issue-14-rabbit-survival.md) and
+[`docs/plans/aquatic-life.md`](plans/aquatic-life.md) for the numbers it has produced.
 
 ## Responsive layout
 

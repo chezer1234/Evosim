@@ -1,7 +1,8 @@
-// Canvas overlay for the simulation: apples on their trees, rabbit and fox
-// sprites, and the selected creature's vision radius + energy bar. Drawn on
-// top of drawMap's terrain pass; mirrors its viewport math (see
-// worldgen/mapgen.js's drawMap) so both layers line up under pan/zoom.
+// Canvas overlay for the simulation: apples on their trees, algae and wrack
+// along the water's edge, the four species' sprites, and the selected
+// creature's sense radius + energy bar. Drawn on top of drawMap's terrain
+// pass; mirrors its viewport math (see worldgen/mapgen.js's drawMap) so both
+// layers line up under pan/zoom.
 //
 // Nothing here reads a creature's *tile*. Every sprite is drawn at the
 // interpolated position the motion layer maintains (see sim/motion.js), so a
@@ -16,9 +17,17 @@
 // cycle, and drags a wake and a set of expanding ripples behind it. Telling
 // "swimming" from "walking through a shallow bit" at a glance is the whole
 // point: water is now a place only some creatures can go (see sim/water.js).
+//
+// The shoreline species are the exception that proves it. A fish has no
+// waterline and no wake because it is not *at* the surface at all - it is
+// drawn under it, washed out by the water above - and a crab is drawn flat on
+// whichever side of the tideline it has decided to feed on. Between them they
+// are how you read the second food chain off the map (see sim/shallows.js).
 
 import { FOREST_VISION_FACTOR, FOX_ENERGY_MAX, foxStats } from './fox.js'
-import { hasCover, usesAtlas } from '../worldgen/mapgen.js'
+import { CRAB_ENERGY_MAX, crabStats } from './crab.js'
+import { FISH_ENERGY_MAX, fishStats } from './fish.js'
+import { hasCover, isWaterType, usesAtlas } from '../worldgen/mapgen.js'
 import { BURROW_CAPACITY, burrowLinks } from './burrow.js'
 import { motionPose } from './motion.js'
 import { rabbitStats } from './rabbit.js'
@@ -58,9 +67,16 @@ export function drawSimulation(ctx, map, sim, tilePx, viewport) {
   }
 
   drawApples(ctx, map, sim, tilePx, ox, oy, startX, startY, endX, endY)
+  // The other larder: algae in the shallows and wrack along the tideline.
+  drawForage(ctx, map, sim, tilePx, ox, oy, startX, startY, endX, endY)
   // Under everything alive: the warren is terrain the rabbits have built,
   // and a rabbit standing on an entrance should be drawn on top of it.
   drawBurrows(ctx, sim, tilePx, ox, oy)
+  // Fish first of all the creatures: they are the only thing here that is
+  // properly *under* the surface, so anything at the water's edge - a
+  // wading fox, a crab on the rocks - belongs on top of them.
+  drawFish(ctx, sim, tilePx, ox, oy, startX, startY, endX, endY)
+  drawCrabs(ctx, map, sim, tilePx, ox, oy, startX, startY, endX, endY)
   drawRabbits(ctx, sim, tilePx, ox, oy, startX, startY, endX, endY)
   // Foxes last, so a fox standing on its kill is drawn over the rabbit.
   drawFoxes(ctx, map, sim, tilePx, ox, oy, startX, startY, endX, endY)
@@ -80,6 +96,20 @@ export function drawSimulation(ctx, map, sim, tilePx, viewport) {
  */
 function drawPopulationOverview(ctx, map, sim, tilePx, ox, oy) {
   const r = Math.max(1.1, tilePx * 0.45)
+  // Fish and crabs first and smaller: at this zoom what they say is "the
+  // shoreline is alive", which is background to where the rabbits and foxes
+  // are rather than a competing foreground.
+  ctx.globalAlpha = 0.75
+  for (const [color, list] of [['rgb(94,197,214)', sim.fish], ['rgb(222,110,92)', sim.crabs]]) {
+    ctx.fillStyle = color
+    for (const c of list) {
+      if (!c.alive) continue
+      ctx.beginPath()
+      ctx.arc((renderX(c) + 0.5) * tilePx - ox, (renderY(c) + 0.5) * tilePx - oy, r * 0.55, 0, Math.PI * 2)
+      ctx.fill()
+    }
+  }
+  ctx.globalAlpha = 1
   for (const [color, list] of [['rgb(238,232,222)', sim.rabbits], ['rgb(232,132,58)', sim.foxes]]) {
     ctx.fillStyle = color
     for (const c of list) {
@@ -134,6 +164,239 @@ function drawApples(ctx, map, sim, tilePx, ox, oy, startX, startY, endX, endY) {
 
 function rgb(r, g, b) {
   return `rgb(${r | 0},${g | 0},${b | 0})`
+}
+
+// ============================== The shallows =============================
+// The second larder, drawn the same way the apples are - a mark on the tile
+// rather than an object in the world - but in two flavours, because the same
+// resource reads as two different things depending on which side of the
+// waterline it is on: a soft algal bloom under the water, a stringy tangle of
+// wrack above it. That distinction is worth drawing: it is exactly the line a
+// crab crosses when it takes a risk (see `boldness` in sim/crab.js).
+
+const WEED_STRANDS = [-0.5, 0, 0.5]
+
+function drawForage(ctx, map, sim, tilePx, ox, oy, startX, startY, endX, endY) {
+  if (tilePx < 4 || !sim.hasForage) return
+  const r = Math.max(0.8, tilePx * 0.1)
+  for (let y = startY; y <= endY; y++) {
+    for (let x = startX; x <= endX; x++) {
+      const idx = y * map.size + x
+      if (!sim.hasForage[idx]) continue
+      const cx = x * tilePx - ox + tilePx * 0.34
+      const cy = y * tilePx - oy + tilePx * 0.66
+      if (isWaterType(map.tileType[idx])) {
+        // Algae: a soft green bloom on the bottom, seen through the water.
+        ctx.fillStyle = 'rgba(120,214,150,0.55)'
+        ctx.beginPath()
+        ctx.ellipse(cx, cy, r * 1.5, r, 0, 0, Math.PI * 2)
+        ctx.fill()
+      } else if (tilePx >= 8) {
+        // Wrack: a few strands left above the tideline, and the only food on
+        // the map a fish cannot reach.
+        ctx.strokeStyle = 'rgba(122,138,74,0.8)'
+        ctx.lineWidth = Math.max(0.5, r * 0.4)
+        ctx.beginPath()
+        for (const lean of WEED_STRANDS) {
+          ctx.moveTo(cx + lean * r, cy + r)
+          ctx.lineTo(cx + lean * r * 2.2, cy - r * 1.2)
+        }
+        ctx.stroke()
+      } else {
+        ctx.fillStyle = 'rgba(122,138,74,0.7)'
+        ctx.fillRect(cx - r, cy - r, r * 2, r * 2)
+      }
+    }
+  }
+}
+
+// ================================= Fish ==================================
+// Drawn *below* the surface rather than riding on it, which is the whole
+// visual point: everything else that goes in the water in this simulation is
+// a land animal out of its element, cut off at the waterline with a wake
+// behind it (see drawSwimmingRabbit). A fish has no waterline. It is a
+// blue-green shape a little way down, slightly washed out by the water above
+// it, and the only tell that it is alive is the tail.
+
+function drawFish(ctx, sim, tilePx, ox, oy, startX, startY, endX, endY) {
+  if (!sim.fish.length) return
+  const r = Math.max(1.2, tilePx * 0.16)
+  for (const fish of sim.fish) {
+    if (!fish.alive) continue
+    const px = renderX(fish)
+    const py = renderY(fish)
+    if (px < startX - 1 || px > endX + 1 || py < startY - 1 || py > endY + 1) continue
+    const cx = (px + 0.5) * tilePx - ox
+    const pose = motionPose(fish)
+    const cy = (py + 0.5) * tilePx - oy - pose.lift * r
+    const selected = sim.selectedKind === 'fish' && fish.id === sim.selectedId
+
+    if (selected) drawVisionRadius(ctx, cx, cy, fishAlertRingPx(fish, tilePx), 'rgba(94,197,214,')
+
+    ctx.save()
+    ctx.translate(cx, cy)
+    ctx.rotate(renderFacing(fish) + Math.PI / 2)
+    // A fish under a metre of water is not a crisp sprite, and a bolting one
+    // is a flash of a paler belly.
+    ctx.globalAlpha = fish.fleeing ? 0.95 : 0.8
+    drawFishBody(ctx, r, tilePx, fish, pose, selected)
+    ctx.restore()
+
+    if (selected && tilePx >= 6) drawEnergyBar(ctx, cx, cy, r, tilePx, fish.energy / FISH_ENERGY_MAX, 'rgb(94,197,214)')
+  }
+}
+
+/** How far this fish notices things, in pixels - the same "what is this
+ * creature's world" ring the rabbits and foxes get when selected. */
+function fishAlertRingPx(fish, tilePx) {
+  const s = fishStats(fish.genes)
+  return s.alertRadius * (1 + (fish.shoaling ? s.shoalAlertBonus : 0)) * tilePx
+}
+
+function drawFishBody(ctx, r, tilePx, fish, pose, selected) {
+  // The tail beats on the stroke cycle whether or not the fish is travelling:
+  // a fish holding station still has to swim.
+  const beat = Math.sin(pose.stroke * Math.PI * 2) * (fish.fleeing ? 0.55 : 0.3)
+  const pelt = fish.fleeing ? [186, 234, 244] : [104, 186, 206]
+
+  ctx.save()
+  ctx.translate(0, r * 0.9)
+  ctx.rotate(beat)
+  ctx.beginPath()
+  ctx.fillStyle = `rgba(${pelt[0] * 0.8 | 0},${pelt[1] * 0.8 | 0},${pelt[2] * 0.8 | 0},0.9)`
+  ctx.moveTo(0, 0)
+  ctx.lineTo(-r * 0.7, r * 1.1)
+  ctx.lineTo(r * 0.7, r * 1.1)
+  ctx.closePath()
+  ctx.fill()
+  ctx.restore()
+
+  ctx.beginPath()
+  ctx.ellipse(0, 0, r * 0.52, r * 1.15, 0, 0, Math.PI * 2)
+  const grad = ctx.createLinearGradient(0, -r, 0, r)
+  grad.addColorStop(0, rgb(Math.min(255, pelt[0] + 40), Math.min(255, pelt[1] + 30), Math.min(255, pelt[2] + 20)))
+  grad.addColorStop(1, rgb(pelt[0] * 0.7, pelt[1] * 0.7, pelt[2] * 0.75))
+  ctx.fillStyle = grad
+  ctx.fill()
+  if (selected) {
+    ctx.lineWidth = Math.max(0.5, r * 0.16)
+    ctx.strokeStyle = 'rgba(255,224,102,0.95)'
+    ctx.stroke()
+  }
+
+  if (tilePx >= 12) {
+    // Dorsal fin and an eye: the two details that stop it reading as a leaf.
+    ctx.beginPath()
+    ctx.fillStyle = `rgba(${pelt[0] * 0.75 | 0},${pelt[1] * 0.75 | 0},${pelt[2] * 0.8 | 0},0.85)`
+    ctx.moveTo(0, -r * 0.2)
+    ctx.lineTo(-r * 0.75, r * 0.35)
+    ctx.lineTo(0, r * 0.5)
+    ctx.closePath()
+    ctx.fill()
+    ctx.beginPath()
+    ctx.fillStyle = 'rgba(20,32,38,0.9)'
+    ctx.arc(r * 0.18, -r * 0.72, Math.max(0.4, r * 0.14), 0, Math.PI * 2)
+    ctx.fill()
+  }
+}
+
+// ================================= Crabs =================================
+// The opposite problem to the fish: a crab is small, dark and sits on ground
+// that is already sand-coloured, so what has to read at a glance is the
+// silhouette - a wide shell with two claws held out in front of it. It is
+// drawn facing its heading like the fox, because a crab backing toward the
+// water is a thing worth being able to see happen.
+
+function drawCrabs(ctx, map, sim, tilePx, ox, oy, startX, startY, endX, endY) {
+  if (!sim.crabs.length) return
+  const r = Math.max(1.4, tilePx * 0.19)
+  for (const crab of sim.crabs) {
+    if (!crab.alive) continue
+    const px = renderX(crab)
+    const py = renderY(crab)
+    if (px < startX - 1 || px > endX + 1 || py < startY - 1 || py > endY + 1) continue
+    const cx = (px + 0.5) * tilePx - ox
+    const baseY = (py + 0.5) * tilePx - oy
+    const pose = motionPose(crab)
+    const inWater = isWaterType(map.tileType[crab.y * map.size + crab.x])
+    const selected = sim.selectedKind === 'crab' && crab.id === sim.selectedId
+
+    if (selected) drawVisionRadius(ctx, cx, baseY, crabStats(crab.genes).alertRadius * tilePx, 'rgba(222,110,92,')
+
+    if (tilePx >= 5 && !inWater) {
+      ctx.beginPath()
+      ctx.fillStyle = 'rgba(20,16,10,0.22)'
+      ctx.ellipse(cx, baseY + r * 0.5, r * 0.95, r * 0.35, 0, 0, Math.PI * 2)
+      ctx.fill()
+    }
+
+    ctx.save()
+    ctx.translate(cx, baseY)
+    ctx.rotate(renderFacing(crab) + Math.PI / 2)
+    // Underwater it is seen through the surface, like the fish.
+    ctx.globalAlpha = inWater ? 0.8 : 1
+    drawCrabBody(ctx, r, tilePx, crab, pose, selected)
+    ctx.restore()
+
+    if (selected && tilePx >= 6) drawEnergyBar(ctx, cx, baseY, r, tilePx, crab.energy / CRAB_ENERGY_MAX, 'rgb(222,110,92)')
+  }
+}
+
+const CRAB_LEG_OFFSETS = [-0.5, 0, 0.5]
+
+function drawCrabBody(ctx, r, tilePx, crab, pose, selected) {
+  // Armour reads as colour: a soft-shelled crab is a dull sand-red, a heavily
+  // armoured one is nearly slate. Same trick the fox's camouflage uses.
+  const armour = crab.genes.armour
+  const shell = [mix(226, 150, armour), mix(104, 108, armour), mix(78, 116, armour)]
+  // Legs scuttle sideways on the gait cycle, and a frightened crab scuttles
+  // twice as hard.
+  const scuttle = Math.sin(pose.stroke * Math.PI * 2) * (crab.fleeing ? 0.5 : 0.25) * r
+
+  if (tilePx >= 9) {
+    ctx.strokeStyle = `rgba(${shell[0] * 0.6 | 0},${shell[1] * 0.6 | 0},${shell[2] * 0.6 | 0},0.95)`
+    ctx.lineWidth = Math.max(0.5, r * 0.14)
+    ctx.beginPath()
+    for (const side of [-1, 1]) {
+      for (const [i, along] of CRAB_LEG_OFFSETS.entries()) {
+        const y = along * r * 0.55
+        const swing = i % 2 === 0 ? scuttle : -scuttle
+        ctx.moveTo(side * r * 0.5, y)
+        ctx.lineTo(side * r * 1.15, y + swing * 0.5)
+      }
+    }
+    ctx.stroke()
+  }
+
+  // Claws, held out in front - the reason a crab silhouette is unmistakable.
+  if (tilePx >= 7) {
+    ctx.fillStyle = rgb(shell[0] * 0.9, shell[1] * 0.9, shell[2] * 0.9)
+    for (const side of [-1, 1]) {
+      ctx.beginPath()
+      ctx.ellipse(side * r * 0.62, -r * 0.85, r * 0.3, r * 0.42, side * -0.5, 0, Math.PI * 2)
+      ctx.fill()
+    }
+  }
+
+  ctx.beginPath()
+  ctx.ellipse(0, 0, r * 0.85, r * 0.62, 0, 0, Math.PI * 2)
+  const grad = ctx.createRadialGradient(-r * 0.2, -r * 0.25, r * 0.1, 0, 0, r)
+  grad.addColorStop(0, rgb(Math.min(255, shell[0] + 30), Math.min(255, shell[1] + 24), Math.min(255, shell[2] + 20)))
+  grad.addColorStop(1, rgb(shell[0] * 0.7, shell[1] * 0.7, shell[2] * 0.72))
+  ctx.fillStyle = grad
+  ctx.fill()
+  ctx.lineWidth = Math.max(0.4, r * 0.12)
+  ctx.strokeStyle = selected ? 'rgba(255,224,102,0.95)' : 'rgba(60,34,26,0.7)'
+  ctx.stroke()
+
+  if (tilePx >= 11) {
+    ctx.fillStyle = 'rgb(28,22,20)'
+    for (const side of [-1, 1]) {
+      ctx.beginPath()
+      ctx.arc(side * r * 0.26, -r * 0.42, Math.max(0.4, r * 0.11), 0, Math.PI * 2)
+      ctx.fill()
+    }
+  }
 }
 
 // =============================== Burrows =================================

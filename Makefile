@@ -9,7 +9,7 @@
 # docs/DEVELOPMENT.md.
 
 .DEFAULT_GOAL := help
-.PHONY: help install dev build preview lint test test-watch check ecosystem ecosystem-scatter ecosystem-boom ecosystem-json
+.PHONY: help install dev build preview lint test test-watch check ecosystem ecosystem-scatter ecosystem-boom ecosystem-shore ecosystem-full ecosystem-json
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -50,6 +50,12 @@ ecosystem-scatter: ## The default scatter scenario, 20 seeds - the headline bala
 
 ecosystem-boom: ## A heavier prey seeding, where predators can overshoot
 	npm run ecosystem -- --rabbits 20 --foxes 5 --minutes 20 --runs 12
+
+ecosystem-shore: ## Foxes, fish and crabs and no rabbits at all - can a pack live off the water's edge?
+	npm run ecosystem -- --rabbits 0 --foxes 4 --fish 25 --crabs 25 --minutes 15 --runs 8
+
+ecosystem-full: ## All four species together: the whole food web on one island
+	npm run ecosystem -- --rabbits 8 --foxes 4 --fish 25 --crabs 25 --minutes 15 --runs 8
 
 ecosystem-json: ## Machine-readable summary, for diffing two branches
 	@npm run --silent ecosystem -- --json

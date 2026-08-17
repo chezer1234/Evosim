@@ -31,6 +31,7 @@ function statusLine(fox) {
   if (fox.swimming) return '🌊 swimming'
   if (fox.feeding) return 'feeding'
   if (fox.hunting) return fox.sprinting ? 'chasing' : 'stalking'
+  if (fox.foraging) return '🦀 working the shoreline'
   if (fox.tracking) return '👃 following a scent'
   if (fox.resting) return 'lying up'
   return 'prowling'
@@ -55,6 +56,10 @@ export default function FoxInsights({ selected, onClose }) {
           <p className="text-xs text-neutral-400">
             {selected.alive ? `Energy ${Math.round(selected.energy)}/${FOX_ENERGY_MAX}` : 'Deceased'} · {selected.kills} kill
             {selected.kills === 1 ? '' : 's'}
+            {/* What it has actually lived on: a fox with no kills and thirty
+                shore catches has made a completely different living from one
+                with the reverse. */}
+            {selected.catches ? ` · ${selected.catches} off the shore` : ''}
             {selected.gestating ? ' · expecting' : ''} · {statusLine(selected)}
             {selected.packing ? ' · with the pack' : ''}
           </p>
@@ -95,6 +100,7 @@ export default function FoxInsights({ selected, onClose }) {
             <li>🐇 {selected.drives.chase}</li>
             <li>💤 {selected.drives.rest}</li>
             <li>🏃 {selected.drives.prey}</li>
+            <li>🦀 {selected.drives.shore}</li>
           </ul>
 
           <div className="flex flex-col gap-1 border-t border-neutral-800 pt-3">
