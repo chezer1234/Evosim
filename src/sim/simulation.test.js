@@ -707,6 +707,26 @@ describe('trait history with both species', () => {
     expect(sample.sheltered).toBe(sim.rabbits.filter((r) => r.burrowId != null).length)
     expect(sample.rabbitGenes.hearing).toBeGreaterThan(0)
   })
+
+  // TRAIT_SAMPLE_MS(5000) and TRAIT_HISTORY_LIMIT(240) aren't exported -
+  // mirrored here to keep this test's expectations self-explanatory.
+  const TRAIT_SAMPLE_MS = 5000
+  const TRAIT_HISTORY_LIMIT = 240
+
+  it("rolls traitHistory off at the cap but keeps fullHistory unbounded, so the Population panel's expanded view can still show the whole run", () => {
+    const sim = createSimulation(makeOpenMap(9))
+    const sampleCount = TRAIT_HISTORY_LIMIT + 10
+    for (let i = 0; i < sampleCount; i++) stepSimulation(sim, TRAIT_SAMPLE_MS)
+
+    expect(sim.traitHistory.length).toBe(TRAIT_HISTORY_LIMIT)
+    expect(sim.fullHistory.length).toBe(sampleCount)
+    // The rolling window is just the tail of the full log, not a separate
+    // series that's drifted out of sync with it.
+    expect(sim.fullHistory.slice(-TRAIT_HISTORY_LIMIT)).toEqual(sim.traitHistory)
+    // fullHistory's first sample - the one traitHistory has already
+    // dropped - is still there, at tSec matching the very first sample.
+    expect(sim.fullHistory[0].tSec).toBe(TRAIT_SAMPLE_MS / 1000)
+  })
 })
 
 // ============================ Issue #14 ==================================

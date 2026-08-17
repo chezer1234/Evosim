@@ -30,7 +30,26 @@ function Sparkline({ history, valueOf, color }) {
   )
 }
 
-function TrendRow({ label, history, valueOf, color }) {
+/** Wraps a mini chart so clicking it opens the full "since the beginning"
+ * view (see ExpandedChart.jsx) instead of just being inert decoration.
+ * `onExpand` is omitted entirely (rather than passed a no-op) where a caller
+ * has nowhere to send it, so this degrades to plain unclickable decoration. */
+function Expandable({ onExpand, label, children }) {
+  if (!onExpand) return children
+  return (
+    <button
+      type="button"
+      onClick={onExpand}
+      aria-label={`Expand ${label} chart`}
+      title="Click to see the full history"
+      className="w-full cursor-zoom-in rounded-sm text-left transition hover:opacity-80 focus:opacity-80 focus:outline-none"
+    >
+      {children}
+    </button>
+  )
+}
+
+function TrendRow({ label, history, valueOf, color, onExpandChart }) {
   const latest = valueOf(history[history.length - 1])
   return (
     <div className="flex flex-col gap-1">
@@ -38,7 +57,9 @@ function TrendRow({ label, history, valueOf, color }) {
         <span>{label} (avg)</span>
         <span className="font-mono tabular-nums">{latest == null ? '—' : `${Math.round(latest * 100)}%`}</span>
       </div>
-      <Sparkline history={history} valueOf={valueOf} color={color} />
+      <Expandable onExpand={onExpandChart && (() => onExpandChart({ kind: 'trend', label, valueOf, color }))} label={label}>
+        <Sparkline history={history} valueOf={valueOf} color={color} />
+      </Expandable>
     </div>
   )
 }
@@ -58,7 +79,7 @@ const POP_CHART_H = 46
  * max (not 0..1 like the trait sparklines) so a crash down to 0 is as
  * visible as the peak - and so the classic predator/prey lag between the two
  * curves is actually readable. */
-function PopulationChart({ history }) {
+function PopulationChart({ history, onExpandChart }) {
   if (history.length < 2) return null
   const max = Math.max(1, ...history.map((s) => Math.max(s.population, s.foxPopulation ?? 0)))
   const seriesPoints = (key) =>
@@ -82,11 +103,13 @@ function PopulationChart({ history }) {
           <span className="text-orange-400">{latest.foxPopulation ?? 0}</span>
         </span>
       </div>
-      <svg viewBox={`0 0 ${POP_CHART_W} ${POP_CHART_H}`} width="100%" height={POP_CHART_H} preserveAspectRatio="none">
-        <polyline points={`0,${POP_CHART_H} ${rabbitPoints} ${POP_CHART_W},${POP_CHART_H}`} fill="rgba(120,214,110,0.15)" stroke="none" />
-        <polyline points={rabbitPoints} fill="none" stroke="rgb(120,214,110)" strokeWidth="1.5" />
-        <polyline points={foxPoints} fill="none" stroke="rgb(251,146,60)" strokeWidth="1.5" />
-      </svg>
+      <Expandable onExpand={onExpandChart && (() => onExpandChart({ kind: 'population' }))} label="population">
+        <svg viewBox={`0 0 ${POP_CHART_W} ${POP_CHART_H}`} width="100%" height={POP_CHART_H} preserveAspectRatio="none">
+          <polyline points={`0,${POP_CHART_H} ${rabbitPoints} ${POP_CHART_W},${POP_CHART_H}`} fill="rgba(120,214,110,0.15)" stroke="none" />
+          <polyline points={rabbitPoints} fill="none" stroke="rgb(120,214,110)" strokeWidth="1.5" />
+          <polyline points={foxPoints} fill="none" stroke="rgb(251,146,60)" strokeWidth="1.5" />
+        </svg>
+      </Expandable>
       <div className="flex justify-between text-[9px] text-neutral-600">
         <span>🐇 rabbits · 🦊 foxes</span>
         <span>peak {max}</span>
@@ -98,7 +121,7 @@ function PopulationChart({ history }) {
 /** `mapInfo` carries the map's size/lakes/seed - shown here only when the
  * caller has nowhere else to put them, which on a compact screen is the case:
  * the phone toolbar has room for the live counts and nothing more. */
-export default function PopulationPanel({ population, foxPopulation, kills, burrows, sheltered, swimmers, seafarers = 0, islands = 1, colonised = 0, atSea = 0, islandRows = [], drownings, history, generationRange, foxGenerationRange, mapInfo, onClose }) {
+export default function PopulationPanel({ population, foxPopulation, kills, burrows, sheltered, swimmers, seafarers = 0, islands = 1, colonised = 0, atSea = 0, islandRows = [], drownings, history, generationRange, foxGenerationRange, mapInfo, onClose, onExpandChart }) {
   const latest = history[history.length - 1]
   const hasFoxTrend = history.some((s) => s.foxGenes)
   const hasFoxInstinctTrend = history.some((s) => s.foxTraits)
@@ -161,11 +184,11 @@ export default function PopulationPanel({ population, foxPopulation, kills, burr
       ) : null}
       {latest ? (
         <div className="flex flex-col gap-2 rounded-sm border border-neutral-800 bg-neutral-950 p-2">
-          <PopulationChart history={history} />
+          <PopulationChart history={history} onExpandChart={onExpandChart} />
           {TRAIT_META.filter((m) => TREND_KEYS.includes(m.key)).map((m) => (
-            <TrendRow key={m.key} label={m.label} history={history} valueOf={(s) => s[m.key]} color={m.color} />
+            <TrendRow key={m.key} label={m.label} history={history} valueOf={(s) => s[m.key]} color={m.color} onExpandChart={onExpandChart} />
           ))}
-          <p className="text-[10px] text-neutral-600">Averaged across every living rabbit, sampled every ~5s of sim time.</p>
+          <p className="text-[10px] text-neutral-600">Averaged across every living rabbit, sampled every ~5s of sim time. Click a chart to see its full history.</p>
           {/* Ears and voices are genes, not brain weights (see sim/rabbit.js),
               so they drift on their own track - and watching hearing creep up
               under fox pressure is the clearest read on selection there is. */}
@@ -173,7 +196,7 @@ export default function PopulationPanel({ population, foxPopulation, kills, burr
             <div className="flex flex-col gap-2 border-t border-neutral-800 pt-2">
               <h3 className="text-[10px] font-semibold tracking-wide text-blue-300/80 uppercase">Rabbit senses</h3>
               {RABBIT_GENE_META.map((m) => (
-                <TrendRow key={m.key} label={m.label} history={history} valueOf={(s) => s.rabbitGenes?.[m.key] ?? null} color={m.color} />
+                <TrendRow key={m.key} label={m.label} history={history} valueOf={(s) => s.rabbitGenes?.[m.key] ?? null} color={m.color} onExpandChart={onExpandChart} />
               ))}
             </div>
           ) : null}
@@ -181,7 +204,7 @@ export default function PopulationPanel({ population, foxPopulation, kills, burr
             <div className="flex flex-col gap-2 border-t border-neutral-800 pt-2">
               <h3 className="text-[10px] font-semibold tracking-wide text-orange-400/80 uppercase">Fox bodies</h3>
               {FOX_GENE_META.filter((m) => FOX_TREND_KEYS.includes(m.key)).map((m) => (
-                <TrendRow key={m.key} label={m.label} history={history} valueOf={(s) => s.foxGenes?.[m.key] ?? null} color={m.color} />
+                <TrendRow key={m.key} label={m.label} history={history} valueOf={(s) => s.foxGenes?.[m.key] ?? null} color={m.color} onExpandChart={onExpandChart} />
               ))}
             </div>
           ) : null}
@@ -193,7 +216,7 @@ export default function PopulationPanel({ population, foxPopulation, kills, burr
             <div className="flex flex-col gap-2 border-t border-neutral-800 pt-2">
               <h3 className="text-[10px] font-semibold tracking-wide text-red-400/80 uppercase">Fox instincts</h3>
               {FOX_TRAIT_META.filter((m) => FOX_INSTINCT_KEYS.includes(m.key)).map((m) => (
-                <TrendRow key={m.key} label={m.label} history={history} valueOf={(s) => s.foxTraits?.[m.key] ?? null} color={m.color} />
+                <TrendRow key={m.key} label={m.label} history={history} valueOf={(s) => s.foxTraits?.[m.key] ?? null} color={m.color} onExpandChart={onExpandChart} />
               ))}
             </div>
           ) : null}

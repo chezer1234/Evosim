@@ -261,6 +261,15 @@ export function createSimulation(map) {
     drownings: 0,
     traitHistory: [],
     traitHistoryAccum: 0,
+    // Uncapped twin of traitHistory, kept for the whole run (traitHistory
+    // above rolls off after TRAIT_HISTORY_LIMIT samples so the compact
+    // Population panel only shows a recent window). Same sample
+    // shape/cadence, so any trend line in that panel - either population,
+    // or a rabbit/fox trait or gene - can be expanded to the full "since
+    // the very beginning" view just by reading from this array instead.
+    // Samples are tiny and only taken every TRAIT_SAMPLE_MS, so even a
+    // multi-hour session stays a few thousand entries.
+    fullHistory: [],
   }
 }
 
@@ -1523,6 +1532,7 @@ function sampleTraitHistory(sim) {
 
   sim.traitHistory.push(sample)
   if (sim.traitHistory.length > TRAIT_HISTORY_LIMIT) sim.traitHistory.shift()
+  sim.fullHistory.push(sample)
 }
 
 /**
