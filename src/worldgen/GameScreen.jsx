@@ -9,6 +9,7 @@ import { describeRabbitSenses } from '../sim/rabbit.js'
 import RabbitInsights from './RabbitInsights.jsx'
 import FoxInsights from './FoxInsights.jsx'
 import PopulationPanel from './PopulationPanel.jsx'
+import ExpandedChart from './ExpandedChart.jsx'
 import SpawnPalette from './SpawnPalette.jsx'
 import { useIsCompact, useIsTouch, usePanelPlacement } from './useIsCompact.js'
 import {
@@ -110,6 +111,7 @@ function buildInsightsData(sim) {
   return {
     selected,
     history: sim.traitHistory,
+    fullHistory: sim.fullHistory,
     population: rabbits.length,
     foxPopulation: foxes.length,
     kills: sim.kills,
@@ -297,6 +299,16 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
   const lastInsightsUpdateRef = useRef(0)
   const INSIGHTS_UPDATE_MS = 400
 
+  // Full-screen chart view: opened by clicking any trend line in the
+  // Population panel (`expandedChart` is null or a descriptor - see
+  // PopulationPanel.jsx's Expandable/onExpandChart - identifying which
+  // series to plot). Forces a pause for the duration (a moving chart is hard
+  // to read in detail) and restores whatever the pause state was beforehand
+  // on close, so it doesn't silently resume a game the player had already
+  // paused on their own.
+  const [expandedChart, setExpandedChart] = useState(null)
+  const wasPausedBeforeExpandRef = useRef(false)
+
   useEffect(() => {
     simRef.current = map ? createSimulation(map) : null
     lastReportedCountsRef.current = { rabbits: 0, foxes: 0, kills: 0 }
@@ -304,6 +316,8 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
     setInsightsData(null)
     pausedRef.current = false
     setPaused(false)
+    setExpandedChart(null)
+    wasPausedBeforeExpandRef.current = false
   }, [map])
 
   const setSpawnOpen = useCallback((open) => {
@@ -398,6 +412,21 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
   const togglePaused = useCallback(() => {
     pausedRef.current = !pausedRef.current
     setPaused(pausedRef.current)
+  }, [])
+
+  const expandChart = useCallback((descriptor) => {
+    wasPausedBeforeExpandRef.current = pausedRef.current
+    pausedRef.current = true
+    setPaused(true)
+    setExpandedChart(descriptor)
+  }, [])
+
+  const collapseChart = useCallback(() => {
+    setExpandedChart(null)
+    if (!wasPausedBeforeExpandRef.current) {
+      pausedRef.current = false
+      setPaused(false)
+    }
   }, [])
 
   const reportZoom = useCallback(() => {
@@ -923,6 +952,7 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
                   : null
               }
               onClose={togglePopulation}
+              onExpandChart={expandChart}
             />
           </div>
         ) : null}
@@ -951,6 +981,9 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
               onClose={toggleSpawnPalette}
             />
           </div>
+        ) : null}
+        {expandedChart ? (
+          <ExpandedChart descriptor={expandedChart} fullHistory={insightsData?.fullHistory ?? []} onClose={collapseChart} />
         ) : null}
       </div>
 
