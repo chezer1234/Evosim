@@ -1,7 +1,8 @@
-// Full-screen "detailed view" for a single trend line from the Population
-// panel - the dual population chart, or one of the trait/gene sparklines
-// (rabbit traits, rabbit senses, fox bodies, fox instincts). Opened by
-// clicking that chart (see the Expandable wrapper in PopulationPanel.jsx);
+// Full-screen "detailed view" for a single chart from the Population panel -
+// either paired-population chart (rabbits/foxes, fish/crabs), or one of the
+// trait/gene sparklines (rabbit traits, rabbit senses, fox bodies, fox
+// instincts, shoreline genes). Opened by clicking that chart (see the
+// Expandable wrapper in PopulationPanel.jsx);
 // GameScreen pauses the sim for the duration so the frozen data on screen
 // matches what's being read off the axes.
 //
@@ -117,8 +118,11 @@ function Stat({ label, value }) {
   )
 }
 
-/** The dual rabbit/fox population chart, expanded. */
-function PopulationDetail({ fullHistory }) {
+/** The two headline charts - rabbits/foxes, and fish/crabs - are the same
+ * chart with different series on it: two raw counts sharing one axis scaled
+ * to their own running max. `spec` is that difference (see PAIR_SPECS). */
+function PairDetail({ fullHistory, spec }) {
+  const [a, b] = spec.series
   const hasData = fullHistory.length >= 2
 
   const chart = useMemo(() => {
@@ -126,46 +130,66 @@ function PopulationDetail({ fullHistory }) {
     const tStart = fullHistory[0].tSec
     const tEnd = fullHistory[fullHistory.length - 1].tSec
     const tSpan = Math.max(1, tEnd - tStart)
-    const domainMax = Math.max(1, ...fullHistory.map((s) => Math.max(s.population, s.foxPopulation ?? 0)))
-    const rabbits = downsample(fullHistory, (s) => s.population, 300)
-    const foxes = downsample(fullHistory, (s) => s.foxPopulation ?? 0, 300)
+    const domainMax = Math.max(1, ...fullHistory.map((s) => Math.max(a.valueOf(s), b.valueOf(s))))
     const xTicks = GRID_FRACTIONS.map((f) => formatDuration(tStart + f * tSpan))
     const yTicks = GRID_FRACTIONS.slice()
       .reverse()
       .map((f) => Math.round(f * domainMax))
     return {
-      rabbitPaths: seriesPaths(rabbits, (s) => s.population, tStart, tSpan, domainMax),
-      foxPaths: seriesPaths(foxes, (s) => s.foxPopulation ?? 0, tStart, tSpan, domainMax),
+      aPaths: seriesPaths(downsample(fullHistory, a.valueOf, 300), a.valueOf, tStart, tSpan, domainMax),
+      bPaths: seriesPaths(downsample(fullHistory, b.valueOf, 300), b.valueOf, tStart, tSpan, domainMax),
       xTicks,
       yTicks,
       domainMax,
     }
-  }, [fullHistory, hasData])
+  }, [fullHistory, hasData, a, b])
 
   if (!hasData) return <p className="py-12 text-center text-sm text-neutral-500">Not enough data yet - let the simulation run a little longer.</p>
 
   const latest = fullHistory[fullHistory.length - 1]
-  const peakRabbits = Math.max(...fullHistory.map((s) => s.population))
-  const peakFoxes = Math.max(...fullHistory.map((s) => s.foxPopulation ?? 0))
 
   return (
     <>
       <div className="flex flex-wrap gap-x-6 gap-y-1 text-xs text-neutral-400">
-        <Stat label="🐇 now" value={latest.population} />
-        <Stat label="🐇 peak" value={peakRabbits} />
-        <Stat label="🦊 now" value={latest.foxPopulation ?? 0} />
-        <Stat label="🦊 peak" value={peakFoxes} />
+        <Stat label={`${a.label} now`} value={a.valueOf(latest)} />
+        <Stat label={`${a.label} peak`} value={Math.max(...fullHistory.map(a.valueOf))} />
+        <Stat label={`${b.label} now`} value={b.valueOf(latest)} />
+        <Stat label={`${b.label} peak`} value={Math.max(...fullHistory.map(b.valueOf))} />
         <Stat label="Elapsed" value={formatDuration(latest.tSec)} />
         <Stat label="Samples" value={fullHistory.length} />
       </div>
       <AxisChart yTicks={chart.yTicks} xTicks={chart.xTicks}>
-        <polyline points={chart.rabbitPaths.fill} fill="rgba(120,214,110,0.15)" stroke="none" />
-        <polyline points={chart.rabbitPaths.line} fill="none" stroke="rgb(120,214,110)" strokeWidth="2" />
-        <polyline points={chart.foxPaths.line} fill="none" stroke="rgb(251,146,60)" strokeWidth="2" />
+        <polyline points={chart.aPaths.fill} fill={alpha(a.color, 0.15)} stroke="none" />
+        <polyline points={chart.aPaths.line} fill="none" stroke={a.color} strokeWidth="2" />
+        <polyline points={chart.bPaths.line} fill="none" stroke={b.color} strokeWidth="2" />
       </AxisChart>
-      <p className="text-center text-[11px] text-neutral-500">🐇 rabbits · 🦊 foxes</p>
+      <p className="text-center text-[11px] text-neutral-500">
+        {a.label} {a.name} · {b.label} {b.name}
+      </p>
     </>
   )
+}
+
+// Keyed by descriptor.kind. The shoreline gets its own axis rather than a
+// third and fourth line on the population chart, for the same reason it does
+// in the compact panel: a lake holds hundreds of fish where an island holds
+// twenty rabbits, and one shared scale would flatten the predator/prey curves
+// into a line along the bottom.
+const PAIR_SPECS = {
+  population: {
+    title: 'Populations',
+    series: [
+      { label: '🐇', name: 'rabbits', color: 'rgb(120,214,110)', valueOf: (s) => s.population ?? 0 },
+      { label: '🦊', name: 'foxes', color: 'rgb(251,146,60)', valueOf: (s) => s.foxPopulation ?? 0 },
+    ],
+  },
+  shoreline: {
+    title: 'The shallows',
+    series: [
+      { label: '🐟', name: 'fish', color: 'rgb(94,197,214)', valueOf: (s) => s.fishPopulation ?? 0 },
+      { label: '🦀', name: 'crabs', color: 'rgb(222,110,92)', valueOf: (s) => s.crabPopulation ?? 0 },
+    ],
+  },
 }
 
 /** Any single 0..1 trend line (a rabbit trait, a rabbit sense gene, a fox
@@ -211,7 +235,8 @@ export default function ExpandedChart({ descriptor, fullHistory, onClose }) {
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
 
-  const title = descriptor.kind === 'population' ? 'Populations - full simulation history' : `${descriptor.label} - full simulation history`
+  const pair = PAIR_SPECS[descriptor.kind]
+  const title = `${pair ? pair.title : descriptor.label} - full simulation history`
 
   return (
     <div
@@ -230,8 +255,8 @@ export default function ExpandedChart({ descriptor, fullHistory, onClose }) {
           <CloseButton onClose={onClose} />
         </div>
 
-        {descriptor.kind === 'population' ? (
-          <PopulationDetail fullHistory={fullHistory} />
+        {pair ? (
+          <PairDetail fullHistory={fullHistory} spec={pair} />
         ) : (
           <TrendDetail valueOf={descriptor.valueOf} color={descriptor.color} fullHistory={fullHistory} />
         )}

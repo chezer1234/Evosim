@@ -32,9 +32,16 @@ import { createNet, forward, mutateNet, sigmoid } from './net.js'
 // normalized to roughly -1..1 by the ranges the fox's own genes give it, so
 // a wide-eyed fox and a short-sighted one read their worlds on the same
 // scale.
-export const FOX_INPUT_SIZE = 14
+//
+// The shore channel is the newest one: where the nearest fish or crab is (see
+// sim/fish.js and sim/crab.js). It is a separate sense from the rabbit
+// channel on purpose - "there is a crab two tiles away" and "there is a
+// rabbit two tiles away" are worth completely different things, and a
+// lineage has to be able to weigh them against each other rather than being
+// told which one to prefer.
+export const FOX_INPUT_SIZE = 17
 export const FOX_HIDDEN_SIZE = 8
-export const FOX_OUTPUT_SIZE = 6 // chase, sprint, track, group, rest, breed
+export const FOX_OUTPUT_SIZE = 7 // chase, sprint, track, group, rest, breed, forage
 export const FOX_BRAIN_SHAPE = { inputs: FOX_INPUT_SIZE, hidden: FOX_HIDDEN_SIZE, outputs: FOX_OUTPUT_SIZE }
 
 // Output indices. `group` is not listed: it is the one decision with no
@@ -46,6 +53,7 @@ const SPRINT_OUTPUT = 1
 const TRACK_OUTPUT = 2
 const REST_OUTPUT = 4
 const BREED_OUTPUT = 5
+const FORAGE_OUTPUT = 6
 
 // Founder priors, exactly like the rabbit's flee/hide biases: a founder pack
 // that had to *discover* chasing rabbits would starve before selection could
@@ -63,6 +71,13 @@ const BREED_INITIAL_BIAS = 1.6
 // somewhere lean can absolutely evolve into one that lies up between meals,
 // which is the most interesting thing this net can discover.
 const REST_INITIAL_BIAS = 1.4
+// Founders take what the tideline offers. Same argument as the chase prior,
+// and it matters more here than anywhere: a fox that has to *discover*
+// picking up a crab starves on an island where the rabbits have already gone
+// under, and "the foxes died out three minutes after the last rabbit" is the
+// exact failure the shoreline exists to fix. A lineage that finds crabs not
+// worth the walk can still evolve straight back off it.
+const FORAGE_INITIAL_BIAS = 1.8
 
 const INITIAL_BIAS = {
   [CHASE_OUTPUT]: CHASE_INITIAL_BIAS,
@@ -70,6 +85,7 @@ const INITIAL_BIAS = {
   [TRACK_OUTPUT]: TRACK_INITIAL_BIAS,
   [REST_OUTPUT]: REST_INITIAL_BIAS,
   [BREED_OUTPUT]: BREED_INITIAL_BIAS,
+  [FORAGE_OUTPUT]: FORAGE_INITIAL_BIAS,
 }
 
 /** A fresh fox brain, using `rng` (a 0..1 generator). */
@@ -101,6 +117,10 @@ export function foxThink(brain, inputs) {
     // Want a litter, still gated on the breed-energy threshold its fecundity
     // gene sets.
     breed: sigmoid(out[5]),
+    // Go and take the fish or crab it can see instead. Small, slow, reliable
+    // food, and the decision that keeps a fox alive between rabbits - or
+    // instead of them.
+    forage: sigmoid(out[6]),
   }
 }
 

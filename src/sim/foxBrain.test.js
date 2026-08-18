@@ -4,10 +4,19 @@ import { WEIGHT_CLAMP } from './net.js'
 import { computeFoxTraits, describeFoxBrain, describeFoxDrives } from './foxInsight.js'
 import { mulberry32 } from '../worldgen/mapgen.js'
 
-// Nothing detected: no prey, no scent, no packmate, full stamina, in the
-// open. Matches buildFoxInputs's "reads as nothing there" convention -
-// distance 1, direction 0.
-const neutralInputs = [1, 0.6, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0]
+// Nothing detected: no prey, no scent, no packmate, nothing on the shoreline,
+// full stamina, in the open. Matches buildFoxInputs's "reads as nothing
+// there" convention - distance 1, direction 0.
+const neutralInputs = [1, 0.6, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 1, 0]
+
+/** neutralInputs with individual channels overridden by index, so a test can
+ * say "same fox, but with a rabbit at 2 o'clock" without respelling
+ * seventeen numbers. */
+function sensing(overrides) {
+  const values = [...neutralInputs]
+  for (const [idx, value] of Object.entries(overrides)) values[idx] = value
+  return values
+}
 
 describe('createFoxBrain', () => {
   it('allocates weight/bias arrays of the expected shape', () => {
@@ -32,10 +41,23 @@ describe('createFoxBrain', () => {
     // selection can reward the first one that tries it.
     let chasing = 0
     for (let seed = 0; seed < 40; seed++) {
-      const out = foxThink(createFoxBrain(mulberry32(seed)), [...neutralInputs.slice(0, 2), 0.2, 0.1, 0.3, ...neutralInputs.slice(5)])
+      const out = foxThink(createFoxBrain(mulberry32(seed)), sensing({ 2: 0.2, 3: 0.1, 4: 0.3 }))
       if (out.chase > 0.5) chasing += 1
     }
     expect(chasing).toBeGreaterThan(25)
+  })
+
+  it('starts founders willing to take what the tideline offers', () => {
+    // FORAGE_INITIAL_BIAS. A founder that has to discover picking a crab up
+    // is a founder that starves the moment the rabbits go under, which is the
+    // failure the shoreline species exist to fix - so foraging starts on and
+    // a lineage evolves its way off it.
+    let foraging = 0
+    for (let seed = 0; seed < 40; seed++) {
+      const out = foxThink(createFoxBrain(mulberry32(seed)), sensing({ 13: 0.3, 14: 0.2, 15: 0.4 }))
+      if (out.forage > 0.5) foraging += 1
+    }
+    expect(foraging).toBeGreaterThan(25)
   })
 
   it('starts founders biased toward lying up rather than pacing the island', () => {
@@ -53,9 +75,9 @@ describe('createFoxBrain', () => {
 describe('foxThink', () => {
   const brain = createFoxBrain(mulberry32(7))
 
-  it('returns the six decisions the sim gates on, all inside 0..1', () => {
+  it('returns the seven decisions the sim gates on, all inside 0..1', () => {
     const out = foxThink(brain, neutralInputs)
-    expect(Object.keys(out).sort()).toEqual(['breed', 'chase', 'group', 'rest', 'sprint', 'track'].sort())
+    expect(Object.keys(out).sort()).toEqual(['breed', 'chase', 'forage', 'group', 'rest', 'sprint', 'track'].sort())
     for (const value of Object.values(out)) {
       expect(value).toBeGreaterThanOrEqual(0)
       expect(value).toBeLessThanOrEqual(1)
@@ -66,19 +88,21 @@ describe('foxThink', () => {
     expect(foxThink(brain, neutralInputs)).toEqual(foxThink(brain, neutralInputs))
   })
 
-  it('reacts to prey, to a scent and to a packmate', () => {
+  it('reacts to prey, to a scent, to a packmate and to something on the shore', () => {
     const quiet = foxThink(brain, neutralInputs)
-    const preyInSight = foxThink(brain, [1, 0.6, 0.5, -0.2, 0.4, 0, 0, 0, 0, 0, 1, 1, 0, 0])
-    const smellsSomething = foxThink(brain, [1, 0.6, 0, 0, 1, 0.7, 0.7, 0.8, 0, 0, 1, 1, 0, 0])
-    const packmateNear = foxThink(brain, [1, 0.6, 0, 0, 1, 0, 0, 0, 0.3, 0.3, 0.4, 1, 0, 0])
+    const preyInSight = foxThink(brain, sensing({ 2: 0.5, 3: -0.2, 4: 0.4 }))
+    const smellsSomething = foxThink(brain, sensing({ 5: 0.7, 6: 0.7, 7: 0.8 }))
+    const packmateNear = foxThink(brain, sensing({ 8: 0.3, 9: 0.3, 10: 0.4 }))
+    const crabInReach = foxThink(brain, sensing({ 13: 0.2, 14: -0.1, 15: 0.2 }))
     expect(preyInSight).not.toEqual(quiet)
     expect(smellsSomething).not.toEqual(quiet)
     expect(packmateNear).not.toEqual(quiet)
+    expect(crabInReach).not.toEqual(quiet)
   })
 
   it('reacts to its own hunger, which is what makes patience evolvable', () => {
-    const full = foxThink(brain, [1, 1, 0.4, 0.1, 0.5, 0, 0, 0, 0, 0, 1, 1, 0, 0])
-    const starving = foxThink(brain, [1, 0.05, 0.4, 0.1, 0.5, 0, 0, 0, 0, 0, 1, 1, 0, 0])
+    const full = foxThink(brain, sensing({ 1: 1, 2: 0.4, 3: 0.1, 4: 0.5 }))
+    const starving = foxThink(brain, sensing({ 1: 0.05, 2: 0.4, 3: 0.1, 4: 0.5 }))
     expect(full).not.toEqual(starving)
   })
 })
@@ -118,7 +142,7 @@ describe('mutateFoxBrain', () => {
 describe('computeFoxTraits', () => {
   it('reads every trait out of the weights, inside 0..1', () => {
     const t = computeFoxTraits(createFoxBrain(mulberry32(4)))
-    for (const key of ['aggression', 'tracking', 'commitment', 'sociability', 'idleness', 'broodiness', 'patience']) {
+    for (const key of ['aggression', 'tracking', 'commitment', 'sociability', 'idleness', 'broodiness', 'patience', 'beachcombing']) {
       expect(t[key]).toBeGreaterThanOrEqual(0)
       expect(t[key]).toBeLessThanOrEqual(1)
     }
@@ -148,7 +172,7 @@ describe('computeFoxTraits', () => {
     expect(blurb.startsWith('This fox')).toBe(true)
     expect(blurb).not.toContain('undefined')
     const drives = describeFoxDrives(t)
-    for (const key of ['chase', 'rest', 'prey']) {
+    for (const key of ['chase', 'rest', 'prey', 'shore']) {
       expect(typeof drives[key]).toBe('string')
       expect(drives[key].length).toBeGreaterThan(10)
     }

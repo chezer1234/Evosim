@@ -1,10 +1,13 @@
-// Small floating overlay showing both populations over time - rabbits and
-// the foxes eating them - plus how each species' genes are drifting.
+// Small floating overlay showing every population over time - rabbits, the
+// foxes eating them, and the fish and crabs the foxes eat when there are no
+// rabbits left - plus how each species' genes are drifting.
 // Deliberately independent of the inspector panels (see RabbitInsights.jsx /
 // FoxInsights.jsx): you can watch the ecosystem without selecting anything,
 // and toggling this doesn't affect those panels or vice versa.
 
 import { TRAIT_META } from '../sim/brainInsight.js'
+import { CRAB_GENE_META } from '../sim/crab.js'
+import { FISH_GENE_META } from '../sim/fish.js'
 import { FOX_GENE_META } from '../sim/fox.js'
 import { FOX_TRAIT_META } from '../sim/foxInsight.js'
 import { RABBIT_GENE_META } from '../sim/rabbit.js'
@@ -70,7 +73,12 @@ const TREND_KEYS = ['foodDrive', 'searchDrive', 'broodiness', 'skittishness', 'b
 const FOX_TREND_KEYS = ['speed', 'vision', 'camouflage', 'metabolism', 'packTendency']
 // And the instincts, off the fox's own neural net: what a lineage has
 // *learned* to do with that body (see sim/foxInsight.js).
-const FOX_INSTINCT_KEYS = ['aggression', 'tracking', 'idleness', 'broodiness', 'patience']
+const FOX_INSTINCT_KEYS = ['aggression', 'tracking', 'idleness', 'broodiness', 'patience', 'beachcombing']
+// The shoreline genes worth a trend line. Crab boldness above all: it is the
+// average distance that population is willing to put between itself and the
+// water, and every fox on the beach is voting on it (see sim/crab.js).
+const CRAB_TREND_KEYS = ['boldness', 'armour']
+const FISH_TREND_KEYS = ['speed', 'wariness', 'shoaling']
 
 const POP_CHART_W = 220
 const POP_CHART_H = 46
@@ -118,14 +126,63 @@ function PopulationChart({ history, onExpandChart }) {
   )
 }
 
+/**
+ * The shoreline populations on their own axis rather than the chart above.
+ *
+ * A productive lake holds hundreds of fish where an island holds twenty
+ * rabbits, so putting them on one scale would flatten the predator/prey
+ * curves into a line along the bottom. What is worth reading here is the
+ * *shape* - a shoal being eaten down and growing back - so it gets its own
+ * running max, and the fox curve stays where it can be compared with the
+ * rabbits it is or isn't catching.
+ */
+function ShorelineChart({ history, onExpandChart }) {
+  if (history.length < 2) return null
+  const max = Math.max(1, ...history.map((s) => Math.max(s.fishPopulation ?? 0, s.crabPopulation ?? 0)))
+  const seriesPoints = (key) =>
+    history
+      .map((s, i) => {
+        const x = (i / (history.length - 1)) * POP_CHART_W
+        const y = POP_CHART_H - ((s[key] ?? 0) / max) * POP_CHART_H
+        return `${x.toFixed(1)},${y.toFixed(1)}`
+      })
+      .join(' ')
+  const latest = history[history.length - 1]
+  return (
+    <div className="flex flex-col gap-1 border-t border-neutral-800 pt-2">
+      <div className="flex items-center justify-between text-[11px] text-neutral-400">
+        <span>The shallows over time</span>
+        <span className="font-mono tabular-nums">
+          <span className="text-sky-400">{latest.fishPopulation ?? 0}</span>
+          <span className="text-neutral-600"> / </span>
+          <span className="text-rose-400">{latest.crabPopulation ?? 0}</span>
+        </span>
+      </div>
+      <Expandable onExpand={onExpandChart && (() => onExpandChart({ kind: 'shoreline' }))} label="shoreline">
+        <svg viewBox={`0 0 ${POP_CHART_W} ${POP_CHART_H}`} width="100%" height={POP_CHART_H} preserveAspectRatio="none">
+          <polyline points={seriesPoints('fishPopulation')} fill="none" stroke="rgb(94,197,214)" strokeWidth="1.5" />
+          <polyline points={seriesPoints('crabPopulation')} fill="none" stroke="rgb(222,110,92)" strokeWidth="1.5" />
+        </svg>
+      </Expandable>
+      <div className="flex justify-between text-[9px] text-neutral-600">
+        <span>🐟 fish · 🦀 crabs</span>
+        <span>peak {max}</span>
+      </div>
+    </div>
+  )
+}
+
 /** `mapInfo` carries the map's size/lakes/seed - shown here only when the
  * caller has nowhere else to put them, which on a compact screen is the case:
  * the phone toolbar has room for the live counts and nothing more. */
-export default function PopulationPanel({ population, foxPopulation, kills, burrows, sheltered, swimmers, seafarers = 0, islands = 1, colonised = 0, atSea = 0, islandRows = [], drownings, history, generationRange, foxGenerationRange, mapInfo, onClose, onExpandChart }) {
+export default function PopulationPanel({ population, foxPopulation, fishPopulation = 0, crabPopulation = 0, kills, shoreCatches = 0, burrows, sheltered, swimmers, seafarers = 0, islands = 1, colonised = 0, atSea = 0, islandRows = [], drownings, history, generationRange, foxGenerationRange, mapInfo, onClose, onExpandChart }) {
   const latest = history[history.length - 1]
   const hasFoxTrend = history.some((s) => s.foxGenes)
   const hasFoxInstinctTrend = history.some((s) => s.foxTraits)
   const hasSenseTrend = history.some((s) => s.rabbitGenes)
+  const hasShoreline = fishPopulation > 0 || crabPopulation > 0 || history.some((s) => s.fishPopulation || s.crabPopulation)
+  const hasFishTrend = history.some((s) => s.fishGenes)
+  const hasCrabTrend = history.some((s) => s.crabGenes)
 
   return (
     <div className={`${PANEL_SHELL} gap-2 border-neutral-800 p-3`}>
@@ -141,7 +198,17 @@ export default function PopulationPanel({ population, foxPopulation, kills, burr
         🦊 {foxPopulation} fox{foxPopulation === 1 ? '' : 'es'}
         {foxGenerationRange ? ` · gen ${foxGenerationRange[0]}–${foxGenerationRange[1]}` : ''}
         {kills ? ` · ${kills} caught` : ''}
+        {shoreCatches ? ` · ${shoreCatches} off the shore` : ''}
       </p>
+      {/* The second food chain, and the reason a fox population can outlive
+          the rabbits entirely (see sim/shallows.js). Hidden until there is
+          something in the water, since an island with a dry shoreline has
+          nothing to say here. */}
+      {hasShoreline ? (
+        <p className="text-xs text-neutral-400">
+          🐟 {fishPopulation} fish · 🦀 {crabPopulation} crab{crabPopulation === 1 ? '' : 's'}
+        </p>
+      ) : null}
       {/* The warren the rabbits have dug for themselves - shown even at zero,
           so "they haven't dug anything yet" is distinguishable from "this
           panel doesn't track that". */}
@@ -185,6 +252,7 @@ export default function PopulationPanel({ population, foxPopulation, kills, burr
       {latest ? (
         <div className="flex flex-col gap-2 rounded-sm border border-neutral-800 bg-neutral-950 p-2">
           <PopulationChart history={history} onExpandChart={onExpandChart} />
+          {hasShoreline ? <ShorelineChart history={history} onExpandChart={onExpandChart} /> : null}
           {TRAIT_META.filter((m) => TREND_KEYS.includes(m.key)).map((m) => (
             <TrendRow key={m.key} label={m.label} history={history} valueOf={(s) => s[m.key]} color={m.color} onExpandChart={onExpandChart} />
           ))}
@@ -217,6 +285,25 @@ export default function PopulationPanel({ population, foxPopulation, kills, burr
               <h3 className="text-[10px] font-semibold tracking-wide text-red-400/80 uppercase">Fox instincts</h3>
               {FOX_TRAIT_META.filter((m) => FOX_INSTINCT_KEYS.includes(m.key)).map((m) => (
                 <TrendRow key={m.key} label={m.label} history={history} valueOf={(s) => s.foxTraits?.[m.key] ?? null} color={m.color} onExpandChart={onExpandChart} />
+              ))}
+            </div>
+          ) : null}
+          {/* Neither shoreline species has a brain, so these bars *are* their
+              evolution: a crab population retreating toward the water, or a
+              shoal getting quicker, is a fox's work showing up in a gene. */}
+          {hasCrabTrend ? (
+            <div className="flex flex-col gap-2 border-t border-neutral-800 pt-2">
+              <h3 className="text-[10px] font-semibold tracking-wide text-rose-400/80 uppercase">Crabs</h3>
+              {CRAB_GENE_META.filter((m) => CRAB_TREND_KEYS.includes(m.key)).map((m) => (
+                <TrendRow key={m.key} label={m.label} history={history} valueOf={(s) => s.crabGenes?.[m.key] ?? null} color={m.color} onExpandChart={onExpandChart} />
+              ))}
+            </div>
+          ) : null}
+          {hasFishTrend ? (
+            <div className="flex flex-col gap-2 border-t border-neutral-800 pt-2">
+              <h3 className="text-[10px] font-semibold tracking-wide text-sky-400/80 uppercase">Fish</h3>
+              {FISH_GENE_META.filter((m) => FISH_TREND_KEYS.includes(m.key)).map((m) => (
+                <TrendRow key={m.key} label={m.label} history={history} valueOf={(s) => s.fishGenes?.[m.key] ?? null} color={m.color} onExpandChart={onExpandChart} />
               ))}
             </div>
           ) : null}

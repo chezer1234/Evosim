@@ -21,10 +21,19 @@
 // islands that an unseeded A/B of 8 runs is mostly measuring the map.
 
 import { generateMap, DEFAULT_SETTINGS, mulberry32 } from '../src/worldgen/mapgen.js'
-import { createSimulation, spawnRabbit, spawnFox, stepSimulation, isPlaceable, TICK_MS } from '../src/sim/simulation.js'
+import {
+  createSimulation,
+  spawnCrab,
+  spawnFish,
+  spawnFox,
+  spawnRabbit,
+  stepSimulation,
+  isPlaceableFor,
+  TICK_MS,
+} from '../src/sim/simulation.js'
 import { computeFoxTraits } from '../src/sim/foxInsight.js'
 
-const DEFAULTS = { rabbits: 5, foxes: 5, minutes: 15, runs: 8, size: 64, seed: 1, json: false }
+const DEFAULTS = { rabbits: 5, foxes: 5, fish: 0, crabs: 0, minutes: 15, runs: 8, size: 64, seed: 1, json: false }
 
 function parseArgs(argv) {
   const opts = { ...DEFAULTS }
@@ -42,29 +51,44 @@ function parseArgs(argv) {
   return opts
 }
 
-function scatter(map, count, rng) {
+// Species-aware, because a fish dropped on a hillside is not a fish: each one
+// is scattered across the tiles it can actually live on (see isPlaceableFor).
+// The attempt budget is generous for the same reason - the shallows are a
+// thin band of a map, so rejection sampling has to work harder for them than
+// it does for a rabbit.
+function scatter(map, species, count, rng) {
   const tiles = []
-  for (let attempts = 0; attempts < count * 400 && tiles.length < count; attempts++) {
+  for (let attempts = 0; attempts < count * 2000 && tiles.length < count; attempts++) {
     const x = Math.floor(rng() * map.size)
     const y = Math.floor(rng() * map.size)
-    if (isPlaceable(map, x, y)) tiles.push([x, y])
+    if (isPlaceableFor(map, species, x, y)) tiles.push([x, y])
   }
   return tiles
 }
 
-const TRACKED_TRAITS = ['aggression', 'tracking', 'idleness', 'patience', 'broodiness']
+const TRACKED_TRAITS = ['aggression', 'tracking', 'idleness', 'patience', 'broodiness', 'beachcombing']
+
+/** Mean of one gene across a population, or null if it died out. The
+ * shoreline species have no brain to read instincts off (see sim/fish.js), so
+ * their genes are the only place their evolution shows up. */
+function meanGene(creatures, key) {
+  if (!creatures.length) return null
+  return creatures.reduce((sum, c) => sum + c.genes[key], 0) / creatures.length
+}
 
 /** One run. Seeds the global rng first, so the map, both species' brains and
  * every decision in the run follow from `seed` alone. */
-export function runScenario({ rabbits, foxes, minutes, size, seed }) {
+export function runScenario({ rabbits, foxes, fish, crabs, minutes, size, seed }) {
   const rng = mulberry32(seed)
   const realRandom = Math.random
   Math.random = rng
   try {
     const map = generateMap({ ...DEFAULT_SETTINGS, size })
     const sim = createSimulation(map)
-    for (const [x, y] of scatter(map, rabbits, rng)) spawnRabbit(sim, x, y)
-    for (const [x, y] of scatter(map, foxes, rng)) spawnFox(sim, x, y)
+    for (const [x, y] of scatter(map, 'rabbit', rabbits, rng)) spawnRabbit(sim, x, y)
+    for (const [x, y] of scatter(map, 'fox', foxes, rng)) spawnFox(sim, x, y)
+    for (const [x, y] of scatter(map, 'fish', fish, rng)) spawnFish(sim, x, y)
+    for (const [x, y] of scatter(map, 'crab', crabs, rng)) spawnCrab(sim, x, y)
 
     let peakRabbits = rabbits
     let peakFoxes = foxes
@@ -86,7 +110,10 @@ export function runScenario({ rabbits, foxes, minutes, size, seed }) {
       seed,
       rabbits: sim.rabbits.length,
       foxes: sim.foxes.length,
+      fish: sim.fish.length,
+      crabs: sim.crabs.length,
       kills: sim.kills,
+      shoreCatches: sim.shoreCatches,
       burrows: sim.burrows.length,
       peakRabbits,
       peakFoxes,
@@ -95,6 +122,17 @@ export function runScenario({ rabbits, foxes, minutes, size, seed }) {
       rabbitGen: sim.rabbits.length ? Math.max(...sim.rabbits.map((r) => r.generation)) : 0,
       foxGen: sim.foxes.length ? Math.max(...sim.foxes.map((f) => f.generation)) : 0,
       foxTraits,
+      // Where the shoreline's own evolution shows up: crabs that have been
+      // worked over by foxes should be retreating toward the water, and fish
+      // in a fished lake should be getting quicker.
+      shoreGenes: {
+        crabBoldness: meanGene(sim.crabs, 'boldness'),
+        crabArmour: meanGene(sim.crabs, 'armour'),
+        fishSpeed: meanGene(sim.fish, 'speed'),
+        fishWariness: meanGene(sim.fish, 'wariness'),
+      },
+      crabGen: sim.crabs.length ? Math.max(...sim.crabs.map((c) => c.generation)) : 0,
+      fishGen: sim.fish.length ? Math.max(...sim.fish.map((f) => f.generation)) : 0,
     }
   } finally {
     Math.random = realRandom
@@ -113,10 +151,15 @@ export function runBatch(opts) {
       runs: results.length,
       rabbitsLeft: mean('rabbits'),
       foxesLeft: mean('foxes'),
+      fishLeft: mean('fish'),
+      crabsLeft: mean('crabs'),
       rabbitExtinctions: results.filter((r) => r.rabbits === 0).length,
       foxExtinctions: results.filter((r) => r.foxes === 0).length,
+      fishExtinctions: results.filter((r) => r.fish === 0).length,
+      crabExtinctions: results.filter((r) => r.crabs === 0).length,
       bothAlive: results.filter((r) => r.rabbits > 0 && r.foxes > 0).length,
       kills: mean('kills'),
+      shoreCatches: mean('shoreCatches'),
       peakFoxes: mean('peakFoxes'),
       maxFoxGen: mean('foxGen'),
       maxRabbitGen: mean('rabbitGen'),
@@ -135,17 +178,32 @@ function main() {
   const mins = (v) => (v == null ? '—' : `${v.toFixed(1)}m`)
   for (const r of results) {
     const traits = r.foxTraits.aggression == null ? '' : `  fox instincts: ${TRACKED_TRAITS.map((k) => `${k} ${Math.round(r.foxTraits[k] * 100)}%`).join(', ')}`
+    const pct = (v) => (v == null ? '—' : `${Math.round(v * 100)}%`)
+    const shore = opts.fish || opts.crabs
+      ? `  fish ${pad(r.fish, 4)} (gen ${r.fishGen}) crabs ${pad(r.crabs, 4)} (gen ${r.crabGen}) shore-catches ${pad(r.shoreCatches, 4)}` +
+        `  crab boldness ${pct(r.shoreGenes.crabBoldness)}/armour ${pct(r.shoreGenes.crabArmour)}` +
+        `  fish speed ${pct(r.shoreGenes.fishSpeed)}/wariness ${pct(r.shoreGenes.fishWariness)}`
+      : ''
     console.log(
       `seed ${pad(r.seed, 4)}: rabbits ${pad(r.rabbits, 4)} (peak ${pad(r.peakRabbits, 4)}, gen ${r.rabbitGen})  ` +
-        `foxes ${pad(r.foxes, 3)} (peak ${pad(r.peakFoxes, 3)}, gen ${r.foxGen})  kills ${pad(r.kills, 4)}  ` +
+        `foxes ${pad(r.foxes, 3)} (peak ${pad(r.peakFoxes, 3)}, gen ${r.foxGen})  kills ${pad(r.kills, 4)}${shore}  ` +
         `rabbits out ${mins(r.rabbitsOutAt)}  foxes out ${mins(r.foxesOutAt)}${traits}`,
     )
   }
   const s = summary
+  const seeded = [`${opts.rabbits} rabbits`, `${opts.foxes} foxes`]
+  if (opts.fish) seeded.push(`${opts.fish} fish`)
+  if (opts.crabs) seeded.push(`${opts.crabs} crabs`)
   console.log('—'.repeat(80))
-  console.log(`${opts.rabbits} rabbits + ${opts.foxes} foxes, ${opts.size}x${opts.size}, ${opts.minutes} sim-minutes, ${s.runs} runs from seed ${opts.seed}`)
+  console.log(`${seeded.join(' + ')}, ${opts.size}x${opts.size}, ${opts.minutes} sim-minutes, ${s.runs} runs from seed ${opts.seed}`)
   console.log(`rabbits left ${s.rabbitsLeft.toFixed(1)} (extinct in ${s.rabbitExtinctions}/${s.runs})`)
   console.log(`foxes   left ${s.foxesLeft.toFixed(1)} (extinct in ${s.foxExtinctions}/${s.runs}), peak ${s.peakFoxes.toFixed(1)}`)
+  if (opts.fish || opts.crabs) {
+    console.log(
+      `fish    left ${s.fishLeft.toFixed(1)} (extinct in ${s.fishExtinctions}/${s.runs}), ` +
+        `crabs left ${s.crabsLeft.toFixed(1)} (extinct in ${s.crabExtinctions}/${s.runs}), shore catches ${s.shoreCatches.toFixed(1)}`,
+    )
+  }
   console.log(`both species alive at the end: ${s.bothAlive}/${s.runs}`)
   console.log(`kills ${s.kills.toFixed(1)}, furthest generation reached: rabbits ${s.maxRabbitGen.toFixed(1)}, foxes ${s.maxFoxGen.toFixed(1)}`)
 }

@@ -1,10 +1,17 @@
-// Two-species population simulation: entity state, the per-tick decision
-// loops, energy/lifecycle and reproduction for both rabbits and the foxes
-// that hunt them.
+// Population simulation: entity state, the per-tick decision loops,
+// energy/lifecycle and reproduction for the rabbits, the foxes that hunt
+// them, and the fish and crabs that give a fox something else to eat.
 //
-// Both species now think with a neural net - rabbits via ./brain.js (see
-// docs/plans/issue-2-species-rabbits.md), foxes via ./foxBrain.js (see
-// docs/plans/fox-neural-nets.md) - and both also carry an explicit gene
+// There are two food chains here, and they meet at the fox. Apples feed
+// rabbits and rabbits feed foxes - the original one, and the one that ends a
+// run the moment the rabbits go under. Algae and wrack feed fish and crabs,
+// and fish and crabs feed a fox that has learned to work a shoreline (see
+// ./shallows.js, ./fish.js, ./crab.js). The second chain is smaller in every
+// direction - a crab is a third of a rabbit and takes as long to eat - which
+// is exactly what makes it a fallback rather than a replacement.
+//
+// Rabbits and foxes both think with a neural net - rabbits via ./brain.js,
+// foxes via ./foxBrain.js - and both also carry an explicit gene
 // vector for the parts of an animal a weight matrix cannot express: the
 // rabbit's ears, voice and swim skill (./rabbit.js) and the fox's whole
 // body (./fox.js). Movement is discrete tile-stepping either way - rabbits
@@ -26,6 +33,16 @@ import { createFoxBrain, foxThink, mutateFoxBrain } from './foxBrain.js'
 import { computeFoxTraits } from './foxInsight.js'
 import { FOREST_SCENT_FACTOR, FOREST_VISION_FACTOR, FOX_ENERGY_MAX, FOX_GENE_KEYS, createFoxGenes, foxStats, mutateFoxGenes } from './fox.js'
 import { RABBIT_GENE_KEYS, alarmReach, createRabbitGenes, mutateRabbitGenes, rabbitStats } from './rabbit.js'
+import { FISH_ENERGY_MAX, FISH_GENE_KEYS, createFishGenes, fishStats, mutateFishGenes } from './fish.js'
+import { CRAB_ENERGY_MAX, CRAB_GENE_KEYS, crabStats, createCrabGenes, mutateCrabGenes } from './crab.js'
+import {
+  FORAGE_REGROW_MS,
+  forageTiles,
+  isBankside,
+  isShallows,
+  isTideline,
+  shoreDistances,
+} from './shallows.js'
 import { HOP, SWIM, advanceMotion, attachMotion, beginMove, teleportMotion } from './motion.js'
 import {
   canEnterTile,
@@ -216,10 +233,83 @@ const SHELTER_ALL_CLEAR_TICKS = 10 // ticks with nothing detected before it will
 // rabbit uses the tunnel network and surfaces at a connected burrow instead.
 const BURROW_MOUTH_DANGER = 2.5
 
+// ========================== The shoreline food ===========================
+// The second food chain (see ./shallows.js, ./fish.js, ./crab.js): algae and
+// wrack feed fish and crabs, and fish and crabs feed a fox that would
+// otherwise have nothing to eat but rabbits. That is the whole reason they
+// exist - an island where the rabbits have crashed used to be an island where
+// the foxes followed them down a few minutes later, which made every long run
+// end the same way.
+const FISH_START_ENERGY = 28
+const FISH_FRY_ENERGY = 16
+const FISH_BREED_COST = 18
+const FISH_BITE_ENERGY = 10
+const CRAB_START_ENERGY = 22
+const CRAB_HATCHLING_ENERGY = 12
+const CRAB_BREED_COST = 13
+const CRAB_BITE_ENERGY = 8
+// Below this share of its tank, a fish or a crab goes looking for food rather
+// than holding station with the shoal or sitting on the weed it is already
+// on. Well above half, for the same reason HUNGRY_ENERGY is: something that
+// only starts looking when it is nearly empty rarely gets there.
+const AQUATIC_HUNGRY_FRACTION = 0.72
+// How far either of them can see a patch of forage. Deliberately short -
+// neither has a fox's nose or a rabbit's ears, and a shoal that could see the
+// whole lake would strip it in one sweep rather than grazing it.
+const FORAGE_SIGHT_RADIUS = 4
+// How long a creature that looked around and saw nothing to eat waits before
+// looking again. It wanders in between, which is what it would be doing
+// anyway - this only stops a stripped patch of shore from costing a full
+// scan per animal per tick.
+const FORAGE_RESCAN_MS = 1000
+// A fleeing animal burns harder, the same multiplier either species pays.
+const AQUATIC_FLEE_UPKEEP = 1.6
+// The carrying capacity of the shallows, as a share of how many tiles of the
+// world can grow anything at all (see forageTiles in shallows.js) - so a pond
+// supports a handful of fish and an archipelago supports a lot of them,
+// rather than one global number being generous on a small map and absurd on a
+// big one. The absolute bounds are a floor for playability (a map with three
+// wet tiles should still hold a few fish) and a ceiling for the frame budget.
+//
+// This is a *ceiling*, not a simulation of the food running out: both species
+// breed slowly enough (see their BREED_COOLDOWN_MS) that a founder shoal
+// takes a few minutes to reach it, and once there it is deaths that make
+// room. What the forage itself decides is finer-grained and more interesting
+// than a number - which patch of water is worth being in, whether a crab has
+// to leave the water to find weed no fish has taken, and who starves when a
+// stretch of shore has been stripped.
+const FISH_CAP_PER_FORAGE_TILE = 0.45
+const CRAB_CAP_PER_FORAGE_TILE = 0.28
+const FISH_CAP_RANGE = [50, 320]
+const CRAB_CAP_RANGE = [30, 200]
+
+// How far a fox can pick a fish or a crab out at, as a share of its normal
+// vision: they are small, low to the ground and half of them are underwater.
+const SHORE_PREY_VISION_FACTOR = 0.6
+// The odds a grab succeeds, before the prey's own genes are taken off it (see
+// `evasion` in fish.js and `toughness` in crab.js). A fox in the water is a
+// far better fisherman than one swiping from the bank - which is one more
+// thing the swim gene quietly buys - and a crab out of the water is simply
+// picked up.
+const FISH_CATCH_CHANCE = { bank: 0.4, swimming: 0.75 }
+const CRAB_CATCH_CHANCE = 0.6
+// What each is worth, as a share of what the same fox gets off a rabbit (see
+// `energyPerKill` in fox.js). A crab is a snack and a fish is most of a meal;
+// neither is a carcass. A fox living entirely off the tideline is a fox that
+// eats constantly and breeds slowly, which is exactly the marginal existence
+// it should be.
+const FISH_MEAL_SHARE = 0.5
+const CRAB_MEAL_SHARE = 0.32
+// Handling time. Much shorter than standing over a rabbit (FOX_FEED_MS):
+// there is not much of a crab to eat.
+const SHORE_FEED_MS = 700
+
 const MOVE_DEADZONE = 0.3
 
 let nextRabbitId = 1
 let nextFoxId = 1
+let nextFishId = 1
+let nextCrabId = 1
 
 function inBounds(map, x, y) {
   return x >= 0 && y >= 0 && x < map.size && y < map.size
@@ -231,14 +321,48 @@ export function isPlaceable(map, x, y) {
   return inBounds(map, x, y) && map.tileType[y * map.size + x] !== TILE.OCEAN
 }
 
+/**
+ * Where a given species may be *dropped* - which is not the same question as
+ * where it may walk, and is asked by the spawn palette and the headless
+ * harness, both of which have a map and no simulation to consult. A fish put
+ * on a hilltop is not a fish, so each species gets its own habitat here
+ * rather than everything sharing the rabbits' rule.
+ */
+export function isPlaceableFor(map, species, x, y) {
+  if (!inBounds(map, x, y)) return false
+  if (species === 'fish') return isShallows(map, x, y)
+  if (species === 'crab') return isShallows(map, x, y) || isTideline(map, x, y)
+  return isPlaceable(map, x, y)
+}
+
 /** Fresh simulation state for a given map. Apple-current-state starts from
  * the map's fixed canHaveApple flags (every eligible tree starts bearing
- * fruit). */
+ * fruit), and the shallows are laid out the same way - see ./shallows.js. */
 export function createSimulation(map) {
+  // Both derived from the map and never changed afterwards: how far each tile
+  // is from water (what a crab's boldness is measured in) and which tiles can
+  // grow algae or wrack at all.
+  const shoreDist = shoreDistances(map)
+  const canHaveForage = forageTiles(map, shoreDist)
+  let forageCount = 0
+  for (let i = 0; i < canHaveForage.length; i++) forageCount += canHaveForage[i]
+  const cap = (per, [lo, hi]) => Math.min(hi, Math.max(lo, Math.round(forageCount * per)))
   return {
     map,
     rabbits: [],
     foxes: [],
+    // The shoreline species. Kept as their own lists rather than one
+    // "creatures" array: every loop in here is species-specific anyway, and
+    // the fox's scans want to ask about fish and crabs separately.
+    fish: [],
+    crabs: [],
+    shoreDist,
+    canHaveForage,
+    hasForage: canHaveForage.slice(),
+    forageRegrowAt: new Float32Array(map.size * map.size).fill(-1),
+    forageQueue: [],
+    fishCap: cap(FISH_CAP_PER_FORAGE_TILE, FISH_CAP_RANGE),
+    crabCap: cap(CRAB_CAP_PER_FORAGE_TILE, CRAB_CAP_RANGE),
     // Every burrow dug so far (see ./burrow.js). Persist for the whole run
     // even when empty: an abandoned hole is still somewhere the next
     // generation can bolt into, which is what makes a warren an asset a
@@ -253,8 +377,12 @@ export function createSimulation(map) {
     // Selection is per-species: ids are only unique within their own list,
     // so the kind is part of the identity.
     selectedId: null,
-    selectedKind: null, // 'rabbit' | 'fox' | null
+    selectedKind: null, // 'rabbit' | 'fox' | 'fish' | 'crab' | null
     kills: 0,
+    // Fish and crabs taken by foxes. Counted apart from `kills` because they
+    // are a different story: a run with 200 shore catches and no kills is a
+    // pack that has stopped hunting rabbits altogether.
+    shoreCatches: 0,
     // Anything that ran out of energy in water rather than on land. Tracked
     // separately from starvation because it is a different story: a creature
     // that drowned was somewhere its genes could not carry it.
@@ -264,13 +392,23 @@ export function createSimulation(map) {
     // Uncapped twin of traitHistory, kept for the whole run (traitHistory
     // above rolls off after TRAIT_HISTORY_LIMIT samples so the compact
     // Population panel only shows a recent window). Same sample
-    // shape/cadence, so any trend line in that panel - either population,
-    // or a rabbit/fox trait or gene - can be expanded to the full "since
-    // the very beginning" view just by reading from this array instead.
+    // shape/cadence, so any chart in that panel - either paired population
+    // count, or any species' trait/gene trend - can be expanded to the full
+    // "since the very beginning" view just by reading from this array
+    // instead.
     // Samples are tiny and only taken every TRAIT_SAMPLE_MS, so even a
     // multi-hour session stays a few thousand entries.
     fullHistory: [],
   }
+}
+
+/** The list a given species lives in. One place that knows the mapping, so
+ * selection, inspection and the UI cannot disagree about it. */
+export function creaturesOfKind(sim, kind) {
+  if (kind === 'fox') return sim.foxes
+  if (kind === 'fish') return sim.fish
+  if (kind === 'crab') return sim.crabs
+  return sim.rabbits
 }
 
 /** Select a creature (or nothing) for the inspector panel. */
@@ -382,6 +520,9 @@ export function spawnFox(sim, x, y, genes, startEnergy = FOX_START_ENERGY, gener
     scentStrength: 0,
     // Lying up: not moving, and burning upkeep at restUpkeepFactor.
     resting: false,
+    // Working the tideline: closing on a fish or a crab rather than a rabbit
+    // (see the shoreline constants above).
+    foraging: false,
     packing: false,
     feedingRemaining: 0,
     gestating: false,
@@ -392,6 +533,9 @@ export function spawnFox(sim, x, y, genes, startEnergy = FOX_START_ENERGY, gener
     nextLitterAt: 0,
     generation,
     kills: 0,
+    // Fish and crabs taken off the shoreline, kept apart from `kills` so the
+    // inspector can say what this fox actually lives on.
+    catches: 0,
     // Chase budget, in decision ticks, refilled while not sprinting.
     sprintBudget: 0,
     // Which way it's pointing (radians), so the renderer can draw a fox
@@ -409,6 +553,73 @@ export function spawnFox(sim, x, y, genes, startEnergy = FOX_START_ENERGY, gener
   fox.sprintBudget = foxStats(fox.genes).maxSprintTicks
   sim.foxes.push(fox)
   return fox
+}
+
+/**
+ * A fish. No brain argument, because a fish has no brain (see ./fish.js) -
+ * its genes are the whole inheritance, and its behaviour is the three fixed
+ * rules in runFishTick.
+ */
+export function spawnFish(sim, x, y, genes, startEnergy = FISH_START_ENERGY, generation = 0) {
+  const fishGenes = genes || createFishGenes(Math.random)
+  const fish = {
+    id: nextFishId++,
+    x,
+    y,
+    energy: startEnergy,
+    alive: true,
+    genes: fishGenes,
+    // Derived once at birth, like a rabbit's senses: the shoaling scan reads
+    // every other fish's stats every decision tick.
+    stats: fishStats(fishGenes),
+    generation,
+    tickAccum: 0,
+    stepPhase: 0,
+    fleeing: false,
+    shoaling: false,
+    // Spawning is instant rather than gestated (a fish sheds eggs, it does
+    // not carry cubs), so what paces a lineage is this cooldown alone.
+    nextBreedAt: 0,
+    searchHeading: Math.random() * Math.PI * 2,
+    searchTicksLeft: 0,
+    // The patch of algae it is currently making for, remembered rather than
+    // re-found every tick (see forageTargetFor).
+    forageTarget: null,
+    nextForageScan: 0,
+    // Everything else in the sim asks entities whether they are swimming; a
+    // fish always is, and the renderer draws it accordingly.
+    swimming: true,
+  }
+  attachMotion(fish, fish.searchHeading)
+  sim.fish.push(fish)
+  return fish
+}
+
+/** A crab. Same deal as the fish: genes only, no net. */
+export function spawnCrab(sim, x, y, genes, startEnergy = CRAB_START_ENERGY, generation = 0) {
+  const crabGenes = genes || createCrabGenes(Math.random)
+  const crab = {
+    id: nextCrabId++,
+    x,
+    y,
+    energy: startEnergy,
+    alive: true,
+    genes: crabGenes,
+    stats: crabStats(crabGenes),
+    generation,
+    tickAccum: 0,
+    stepPhase: 0,
+    fleeing: false,
+    nextBreedAt: 0,
+    searchHeading: Math.random() * Math.PI * 2,
+    searchTicksLeft: 0,
+    forageTarget: null,
+    nextForageScan: 0,
+    swimming: isWaterTile(sim.map, x, y),
+  }
+  attachMotion(crab, crab.searchHeading)
+  sim.crabs.push(crab)
+  return crab
 }
 
 function findNearestApple(sim, x, y) {
@@ -602,6 +813,36 @@ function senseScent(sim, fox, radius) {
     dist: bestDist,
     strength: 1 - bestDist / bestReach,
   }
+}
+
+/**
+ * The nearest fish or crab this fox could actually get to, and which of the
+ * two it is.
+ *
+ * "Could actually get to" is the interesting clause. A fox that cannot swim -
+ * which is nearly all of them, see FOUNDER_MEAN in fox.js - can only reach
+ * water that has a bank on it, so a fish out in the middle of a lake is not
+ * prey to it, it is scenery. Without that check a landlocked pack spends its
+ * life walking up to a shoreline and stopping, which looks exactly like a bug
+ * and starves them just as effectively.
+ */
+function findNearestShorePrey(sim, fox, radius, canSwim) {
+  let best = null
+  let bestKind = null
+  let bestDist = Infinity
+  const reachable = (x, y) => canSwim || !isWaterTile(sim.map, x, y) || isBankside(sim.map, x, y)
+  for (const [kind, list] of [['crab', sim.crabs], ['fish', sim.fish]]) {
+    for (const c of list) {
+      if (!c.alive) continue
+      const dist = Math.hypot(c.x - fox.x, c.y - fox.y)
+      if (dist > radius || dist >= bestDist) continue
+      if (!reachable(c.x, c.y)) continue
+      bestDist = dist
+      best = c
+      bestKind = kind
+    }
+  }
+  return best ? { creature: best, kind: bestKind, dist: bestDist } : null
 }
 
 /** The nearest other live fox within `radius`, for pack behaviour. */
@@ -1194,6 +1435,47 @@ function tryPounce(sim, fox, stats) {
   }
 }
 
+/**
+ * The other way a fox eats: a grab at whatever is in reach along the water's
+ * edge. Crabs first, because a crab is the easier of the two and a fox with
+ * one in front of it is not going to ignore it in favour of a fish.
+ *
+ * Unlike the pounce, this can *miss* - a fish flicks away, a shell turns the
+ * paw - which is the whole difference between the two food sources. A rabbit
+ * is rare, fast and worth a great deal when it works; the tideline is
+ * constant, slow and worth a mouthful when it works, and it works often
+ * enough to live on. Both species' escape odds come off their own genes (see
+ * `evasion` in fish.js and `toughness` in crab.js), so what a fox is really
+ * chasing along a beach is a population that is getting harder to catch.
+ */
+function tryCatchShorePrey(sim, fox, stats) {
+  if (!fox.foraging) return
+  const inReach = (c) => Math.abs(c.x - fox.x) <= POUNCE_RANGE && Math.abs(c.y - fox.y) <= POUNCE_RANGE
+  for (const crab of sim.crabs) {
+    if (!crab.alive || !inReach(crab)) continue
+    if (Math.random() >= CRAB_CATCH_CHANCE * (1 - crab.stats.toughness)) continue
+    takeShorePrey(sim, fox, crab, stats.energyPerKill * CRAB_MEAL_SHARE)
+    return
+  }
+  for (const fish of sim.fish) {
+    if (!fish.alive || !inReach(fish)) continue
+    const base = fox.swimming ? FISH_CATCH_CHANCE.swimming : FISH_CATCH_CHANCE.bank
+    if (Math.random() >= base * (1 - fish.stats.evasion)) continue
+    takeShorePrey(sim, fox, fish, stats.energyPerKill * FISH_MEAL_SHARE)
+    return
+  }
+}
+
+function takeShorePrey(sim, fox, prey, gain) {
+  prey.alive = false
+  prey.energy = 0
+  fox.energy = Math.min(FOX_ENERGY_MAX, fox.energy + gain)
+  fox.catches += 1
+  sim.shoreCatches += 1
+  fox.feedingRemaining = SHORE_FEED_MS
+  fox.foraging = false
+}
+
 /** True when another live fox is close enough that this one will not den
  * here (see FOX_TERRITORY_RADIUS). */
 function territoryTaken(sim, fox) {
@@ -1232,7 +1514,7 @@ function finishFoxGestation(sim, fox) {
  * distance 1 with a zero direction - the same convention the rabbit inputs
  * use for "no apple, no fox".
  */
-function buildFoxInputs(fox, stats, prey, scent, packmate, visionRadius, inForest) {
+function buildFoxInputs(fox, stats, prey, scent, packmate, visionRadius, inForest, shorePrey, shoreRadius) {
   return [
     1,
     fox.energy / FOX_ENERGY_MAX,
@@ -1247,6 +1529,9 @@ function buildFoxInputs(fox, stats, prey, scent, packmate, visionRadius, inFores
     packmate ? packmate.dist / stats.packRadius : 1,
     Math.min(1, fox.sprintBudget / Math.max(1, stats.maxSprintTicks)),
     inForest ? 1 : 0,
+    shorePrey ? (shorePrey.creature.x - fox.x) / shoreRadius : 0,
+    shorePrey ? (shorePrey.creature.y - fox.y) / shoreRadius : 0,
+    shorePrey ? shorePrey.dist / shoreRadius : 1,
     Math.random() * 2 - 1,
   ]
 }
@@ -1259,6 +1544,7 @@ function runFoxDecisionTick(sim, fox) {
   if (fox.floundering) {
     fox.hunting = false
     fox.sprinting = false
+    fox.foraging = false
     fox.packing = false
     const land = towardNearestLand(sim.map, fox.x, fox.y)
     const dir = land || { x: Math.cos(fox.searchHeading), y: Math.sin(fox.searchHeading) }
@@ -1274,6 +1560,7 @@ function runFoxDecisionTick(sim, fox) {
     fox.hunting = false
     fox.sprinting = false
     fox.tracking = false
+    fox.foraging = false
     fox.resting = false
     fox.sprintBudget = Math.min(stats.maxSprintTicks, fox.sprintBudget + 0.5 + fox.genes.stamina)
     return
@@ -1291,10 +1578,15 @@ function runFoxDecisionTick(sim, fox) {
   const prey = findNearestPrey(sim, fox, visionRadius)
   const scent = senseScent(sim, fox, stats.scentRadius)
   const packmate = findNearestPackmate(sim, fox, stats.packRadius)
+  // A fish or a crab is a small thing close to the ground, so it is spotted
+  // at a fraction of the range a rabbit is - but it is spotted through the
+  // trees just the same, and it does not run nearly as far.
+  const shoreRadius = visionRadius * SHORE_PREY_VISION_FACTOR
+  const shorePrey = findNearestShorePrey(sim, fox, shoreRadius, stats.canSwim)
   fox.packing = !!packmate
   fox.scentStrength = scent ? scent.strength : 0
 
-  const out = foxThink(fox.brain, buildFoxInputs(fox, stats, prey, scent, packmate, visionRadius, inForest))
+  const out = foxThink(fox.brain, buildFoxInputs(fox, stats, prey, scent, packmate, visionRadius, inForest, shorePrey, shoreRadius))
 
   // Every one of these is the brain's call, gated at 0.5 - where the old fox
   // had an if/else ladder and one `bloodlust` number. Hunting a rabbit it
@@ -1303,6 +1595,18 @@ function runFoxDecisionTick(sim, fox) {
   // order of how immediate they are rather than by which output happens to
   // be largest.
   fox.hunting = !!prey && out.chase > 0.5
+  // The tideline sits directly below chasing a rabbit and above everything
+  // else: a rabbit is worth four crabs, so a fox that can see one goes for
+  // it, but a crab in reach beats lying up, following a smell or catching up
+  // with the pack - all three of which are ways of *maybe* eating later.
+  //
+  // Hunger overrides the brain here exactly as it does for resting: a fox
+  // down to its last reserves takes the certain mouthful whatever its
+  // instincts say about beachcombing. That override is what makes "the foxes
+  // survive without rabbits" a property of the simulation rather than of
+  // whichever lineage happened to evolve a taste for shellfish.
+  const starving = fox.energy <= FOX_ROUSE_ENERGY
+  fox.foraging = !fox.hunting && !!shorePrey && (out.forage > 0.5 || starving)
   // Lying up outranks the nose on purpose: "sit tight and take whatever
   // wanders past" and "walk the island following smells" are the two
   // strategies this net can express, and they are only genuinely different
@@ -1311,9 +1615,10 @@ function runFoxDecisionTick(sim, fox) {
   // to be something a fox does with reserves, not instead of eating.
   // Not in the water, either: treading water is not resting, and a fox
   // that stopped swimming to have a lie-down would simply drown.
-  fox.resting = !fox.hunting && !fox.swimming && out.rest > 0.5 && fox.energy > FOX_ROUSE_ENERGY
-  fox.tracking = !fox.hunting && !fox.resting && !!scent && out.track > 0.5
-  const grouping = !fox.hunting && !fox.resting && !fox.tracking && !!packmate && out.group > 0.5 && packmate.dist > FOX_PACK_KEEP_DISTANCE
+  fox.resting = !fox.hunting && !fox.foraging && !fox.swimming && out.rest > 0.5 && fox.energy > FOX_ROUSE_ENERGY
+  fox.tracking = !fox.hunting && !fox.foraging && !fox.resting && !!scent && out.track > 0.5
+  const grouping =
+    !fox.hunting && !fox.foraging && !fox.resting && !fox.tracking && !!packmate && out.group > 0.5 && packmate.dist > FOX_PACK_KEEP_DISTANCE
 
   let moveX = 0
   let moveY = 0
@@ -1340,7 +1645,16 @@ function runFoxDecisionTick(sim, fox) {
     }
   } else {
     fox.sprinting = false
-    if (fox.tracking) {
+    if (fox.foraging) {
+      // Straight at it, at a walk. Nothing sprints at a crab: the whole
+      // appeal of the tideline is that it does not run far enough to be
+      // worth spending stamina on.
+      const dx = shorePrey.creature.x - fox.x
+      const dy = shorePrey.creature.y - fox.y
+      const len = Math.hypot(dx, dy) || 1
+      moveX = dx / len
+      moveY = dy / len
+    } else if (fox.tracking) {
       // Up the scent gradient, or at least the fox's best guess at it.
       moveX = scent.dx
       moveY = scent.dy
@@ -1372,6 +1686,7 @@ function runFoxDecisionTick(sim, fox) {
   if (!fox.resting) moveFox(sim, fox, moveX, moveY, tilesPerTick, stats)
   updateWaterState(fox, sim, stats.canSwim)
   tryPounce(sim, fox, stats)
+  tryCatchShorePrey(sim, fox, stats)
   tryFoxReproduce(sim, fox, stats, out.breed > 0.5)
 }
 
@@ -1412,19 +1727,338 @@ function stepFox(sim, fox, dtMs) {
   advanceMotion(fox, dtMs)
 }
 
-// Only the trees that have actually been eaten are waiting to regrow, so
+// ============================ Shoreline life =============================
+// Fish and crabs: the second food chain, and the one that does not run
+// through a rabbit (see ./shallows.js for why it exists at all).
+//
+// Neither species has a brain, and the code below is why that is enough.
+// A fish eats, holds with the shoal and bolts; a crab eats, and gets back in
+// the water. What varies between individuals is entirely in their genes -
+// how fast, how twitchy, how tightly shoaled, how far up the beach - so the
+// interesting evolution here is a population being *reshaped* by the foxes
+// working it, rather than a population arguing with itself about what to do.
+
+/** The nearest live fox within `radius` of a point. Both aquatic species'
+ * entire threat model. */
+function nearestFoxWithin(sim, x, y, radius) {
+  let best = null
+  let bestDist = Infinity
+  for (const fox of sim.foxes) {
+    if (!fox.alive) continue
+    const dist = Math.hypot(fox.x - x, fox.y - y)
+    if (dist > radius || dist >= bestDist) continue
+    bestDist = dist
+    best = fox
+  }
+  return best ? { fox: best, dist: bestDist } : null
+}
+
+/**
+ * *A* live fish within `radius` - the first one found, not the nearest.
+ *
+ * A shoal is not a formation, it is a habit of not being alone, so "hold
+ * station with whichever neighbour I noticed" is both the honest model and
+ * the cheap one: it lets the scan stop at the first hit instead of walking
+ * every fish in the world, which is the difference between a lake of two
+ * hundred fish costing linear work per tick and quadratic.
+ */
+function anyShoalmate(sim, fish, radius) {
+  for (const other of sim.fish) {
+    if (other === fish || !other.alive) continue
+    const dist = Math.hypot(other.x - fish.x, other.y - fish.y)
+    if (dist <= radius) return { fish: other, dist }
+  }
+  return null
+}
+
+/** The nearest tile within `radius` that is bearing forage *and* that this
+ * creature may enter. A box scan rather than anything cleverer: the radius is
+ * four tiles, and both species are cheap enough to think about that there is
+ * nothing here worth indexing. */
+function findNearestForage(sim, x, y, radius, canEnter) {
+  const { map, hasForage } = sim
+  let bestDist = Infinity
+  let bestX = -1
+  let bestY = -1
+  for (let ty = Math.max(0, y - radius); ty <= Math.min(map.size - 1, y + radius); ty++) {
+    for (let tx = Math.max(0, x - radius); tx <= Math.min(map.size - 1, x + radius); tx++) {
+      if (!hasForage[ty * map.size + tx]) continue
+      const dist = Math.hypot(tx - x, ty - y)
+      if (dist > radius || dist >= bestDist) continue
+      if (!canEnter(tx, ty)) continue
+      bestDist = dist
+      bestX = tx
+      bestY = ty
+    }
+  }
+  return bestX < 0 ? null : { x: bestX, y: bestY, dist: bestDist }
+}
+
+/**
+ * The patch this creature is currently making for, remembered between ticks.
+ *
+ * The scan itself is a box of tiles around it, and both species do it while
+ * hungry, which is most of the time - so doing it every tick for every fish
+ * in a full lake is the single most expensive thing the shoreline added.
+ * Remembering the target costs one object and makes it rare: a fish
+ * re-scans when it arrives, when something else eats the patch first, or
+ * (FORAGE_RESCAN_MS later) when the last look found nothing at all.
+ */
+function forageTargetFor(sim, entity, canEnter) {
+  const t = entity.forageTarget
+  if (t && sim.hasForage[t.y * sim.map.size + t.x] && canEnter(t.x, t.y) && (t.x !== entity.x || t.y !== entity.y)) return t
+  if (sim.clock < entity.nextForageScan) return null
+  const found = findNearestForage(sim, entity.x, entity.y, FORAGE_SIGHT_RADIUS, canEnter)
+  entity.forageTarget = found ? { x: found.x, y: found.y } : null
+  if (!found) entity.nextForageScan = sim.clock + FORAGE_RESCAN_MS
+  return entity.forageTarget
+}
+
+/** Eat the algae/wrack under this creature, if there is any and it has room
+ * for it. The "has room" clause matters: without it a full shoal strips the
+ * shallows bare for nothing, and the carrying capacity the whole food chain
+ * rests on stops meaning anything. */
+function takeForage(sim, entity, gain, energyMax) {
+  const idx = entity.y * sim.map.size + entity.x
+  if (!sim.hasForage[idx] || entity.energy > energyMax - gain) return false
+  sim.hasForage[idx] = 0
+  sim.forageRegrowAt[idx] = sim.clock + FORAGE_REGROW_MS
+  sim.forageQueue.push(idx)
+  entity.energy = Math.min(energyMax, entity.energy + gain)
+  return true
+}
+
+/** A unit vector toward whichever neighbouring tile is closer to the water -
+ * the crab's version of towardNearestLand (see water.js), and the reason a
+ * crab caught out on the sand has somewhere to run. */
+function towardWater(sim, x, y) {
+  const { map, shoreDist } = sim
+  const here = shoreDist[y * map.size + x]
+  let bestX = 0
+  let bestY = 0
+  let best = here
+  for (const [dx, dy] of NEIGHBOR_OFFSETS) {
+    const nx = x + dx
+    const ny = y + dy
+    if (!inBounds(map, nx, ny)) continue
+    const d = shoreDist[ny * map.size + nx]
+    if (d >= best) continue
+    best = d
+    bestX = dx
+    bestY = dy
+  }
+  if (bestX === 0 && bestY === 0) return null
+  const len = Math.hypot(bestX, bestY) || 1
+  return { x: bestX / len, y: bestY / len }
+}
+
+function tryAquaticStep(sim, entity, dirX, dirY, canEnter, durationMs) {
+  const nx = entity.x + dirX
+  const ny = entity.y + dirY
+  if (!canEnter(nx, ny)) return false
+  entity.x = nx
+  entity.y = ny
+  entity.swimming = isWaterTile(sim.map, nx, ny)
+  beginMove(entity, nx, ny, durationMs, entity.swimming ? SWIM : HOP)
+  return true
+}
+
+/** One tile-step, sliding along a single axis if the diagonal is blocked -
+ * the same treatment the other two species get (see stepRabbitOnce), and it
+ * matters more here than anywhere: a fish's world is *entirely* edges. */
+function stepAquaticOnce(sim, entity, moveX, moveY, canEnter, durationMs) {
+  const dirX = moveX > MOVE_DEADZONE ? 1 : moveX < -MOVE_DEADZONE ? -1 : 0
+  const dirY = moveY > MOVE_DEADZONE ? 1 : moveY < -MOVE_DEADZONE ? -1 : 0
+  if (dirX === 0 && dirY === 0) return false
+  if (tryAquaticStep(sim, entity, dirX, dirY, canEnter, durationMs)) return true
+  if (dirX !== 0 && tryAquaticStep(sim, entity, dirX, 0, canEnter, durationMs)) return true
+  return dirY !== 0 && tryAquaticStep(sim, entity, 0, dirY, canEnter, durationMs)
+}
+
+/** A neighbouring tile to be born onto, or the parent's own if the water
+ * around it is full up against a bank. */
+function aquaticBirthTile(x, y, canEnter) {
+  for (const [dx, dy] of NEIGHBOR_OFFSETS) {
+    if (canEnter(x + dx, y + dy)) return [x + dx, y + dy]
+  }
+  return [x, y]
+}
+
+/** Where a fish may go: sunlit water and nowhere else. The deep is as much a
+ * wall to it as the beach is - it grows nothing, and a fish that wandered out
+ * there would starve in a place nothing could even eat it. */
+function fishCanEnter(sim, x, y) {
+  return isShallows(sim.map, x, y)
+}
+
+/**
+ * Where a crab may go: the shallows always, plus however much dry land its
+ * boldness gene will carry it across (see `landReach` in crab.js).
+ *
+ * The last clause is the escape hatch. A crab that finds itself further
+ * inland than its own genes allow - dropped there by the spawn palette, or
+ * hatched from a bolder parent - is not frozen in place: it may always move
+ * *closer* to the water. Same reasoning as the `fromWater` exemption in
+ * water.js: habitat rules should shape where something lives, not build traps
+ * it cannot walk out of.
+ */
+function crabCanEnter(sim, crab, x, y) {
+  const { map } = sim
+  if (!inBounds(map, x, y)) return false
+  if (isWaterTile(map, x, y)) return isShallows(map, x, y)
+  const d = sim.shoreDist[y * map.size + x]
+  if (d <= crab.stats.landReach) return true
+  return d < sim.shoreDist[crab.y * map.size + crab.x]
+}
+
+function runFishTick(sim, fish) {
+  const stats = fish.stats
+  const shoalmate = stats.shoalRadius > 0 ? anyShoalmate(sim, fish, stats.shoalRadius) : null
+  fish.shoaling = !!shoalmate
+  // Collective vigilance: the shoal is watching for you too.
+  const alert = stats.alertRadius * (1 + (shoalmate ? stats.shoalAlertBonus : 0))
+  const threat = nearestFoxWithin(sim, fish.x, fish.y, alert)
+  fish.fleeing = !!threat
+
+  let moveX = 0
+  let moveY = 0
+  if (threat) {
+    const dx = fish.x - threat.fox.x
+    const dy = fish.y - threat.fox.y
+    const len = Math.hypot(dx, dy)
+    if (len === 0) {
+      updateSearchHeading(fish)
+      moveX = Math.cos(fish.searchHeading)
+      moveY = Math.sin(fish.searchHeading)
+    } else {
+      moveX = dx / len
+      moveY = dy / len
+    }
+  } else {
+    const hungry = fish.energy < FISH_ENERGY_MAX * AQUATIC_HUNGRY_FRACTION
+    const food = hungry ? forageTargetFor(sim, fish, (x, y) => fishCanEnter(sim, x, y)) : null
+    if (food) {
+      const dx = food.x - fish.x
+      const dy = food.y - fish.y
+      const len = Math.hypot(dx, dy) || 1
+      moveX = dx / len
+      moveY = dy / len
+    } else if (shoalmate && shoalmate.dist > 1.5) {
+      const dx = shoalmate.fish.x - fish.x
+      const dy = shoalmate.fish.y - fish.y
+      const len = Math.hypot(dx, dy) || 1
+      moveX = dx / len
+      moveY = dy / len
+    } else {
+      updateSearchHeading(fish)
+      moveX = Math.cos(fish.searchHeading)
+      moveY = Math.sin(fish.searchHeading)
+    }
+  }
+
+  fish.stepPhase = (fish.stepPhase + 1) % stats.strokeTicks
+  if (fish.stepPhase === 0) {
+    stepAquaticOnce(sim, fish, moveX, moveY, (x, y) => fishCanEnter(sim, x, y), stats.strokeTicks * TICK_MS)
+  }
+
+  takeForage(sim, fish, FISH_BITE_ENERGY, FISH_ENERGY_MAX)
+
+  if (fish.energy >= stats.breedEnergy && sim.clock >= fish.nextBreedAt && sim.fish.length < sim.fishCap) {
+    fish.energy -= FISH_BREED_COST
+    fish.nextBreedAt = sim.clock + stats.breedCooldownMs
+    const [nx, ny] = aquaticBirthTile(fish.x, fish.y, (x, y) => fishCanEnter(sim, x, y))
+    const fry = spawnFish(sim, nx, ny, mutateFishGenes(fish.genes, Math.random), FISH_FRY_ENERGY, fish.generation + 1)
+    // Fry are born on the clock, exactly like fox cubs (see
+    // finishFoxGestation): without it a fish that eats two patches of algae
+    // spawns, and so does everything it spawned, and the shallows go from
+    // forty fish to their ceiling inside ten seconds. A generation should
+    // take a generation.
+    fry.nextBreedAt = sim.clock + fry.stats.breedCooldownMs
+  }
+}
+
+function runCrabTick(sim, crab) {
+  const stats = crab.stats
+  const threat = nearestFoxWithin(sim, crab.x, crab.y, stats.alertRadius)
+  const stranded = !isWaterTile(sim.map, crab.x, crab.y) && sim.shoreDist[crab.y * sim.map.size + crab.x] > stats.landReach
+  crab.fleeing = !!threat
+
+  let moveX = 0
+  let moveY = 0
+  const water = threat || stranded ? towardWater(sim, crab.x, crab.y) : null
+  if (water) {
+    // Everything a crab does when frightened is "get back in the sea".
+    moveX = water.x
+    moveY = water.y
+  } else if (threat) {
+    // Already in the water: put distance between itself and the bank.
+    const dx = crab.x - threat.fox.x
+    const dy = crab.y - threat.fox.y
+    const len = Math.hypot(dx, dy) || 1
+    moveX = dx / len
+    moveY = dy / len
+  } else {
+    const hungry = crab.energy < CRAB_ENERGY_MAX * AQUATIC_HUNGRY_FRACTION
+    const food = hungry ? forageTargetFor(sim, crab, (x, y) => crabCanEnter(sim, crab, x, y)) : null
+    if (food) {
+      const dx = food.x - crab.x
+      const dy = food.y - crab.y
+      const len = Math.hypot(dx, dy) || 1
+      moveX = dx / len
+      moveY = dy / len
+    } else {
+      updateSearchHeading(crab)
+      moveX = Math.cos(crab.searchHeading)
+      moveY = Math.sin(crab.searchHeading)
+    }
+  }
+
+  crab.stepPhase = (crab.stepPhase + 1) % stats.strokeTicks
+  if (crab.stepPhase === 0) {
+    stepAquaticOnce(sim, crab, moveX, moveY, (x, y) => crabCanEnter(sim, crab, x, y), stats.strokeTicks * TICK_MS)
+  }
+
+  takeForage(sim, crab, CRAB_BITE_ENERGY, CRAB_ENERGY_MAX)
+
+  if (crab.energy >= stats.breedEnergy && sim.clock >= crab.nextBreedAt && sim.crabs.length < sim.crabCap) {
+    crab.energy -= CRAB_BREED_COST
+    crab.nextBreedAt = sim.clock + stats.breedCooldownMs
+    const [nx, ny] = aquaticBirthTile(crab.x, crab.y, (x, y) => crabCanEnter(sim, crab, x, y))
+    const hatchling = spawnCrab(sim, nx, ny, mutateCrabGenes(crab.genes, Math.random), CRAB_HATCHLING_ENERGY, crab.generation + 1)
+    hatchling.nextBreedAt = sim.clock + hatchling.stats.breedCooldownMs
+  }
+}
+
+/** The energy/lifecycle half, shared by both shoreline species: a continuous
+ * burn (like a fox's, since their upkeep is a gene rather than a constant),
+ * then however many decision ticks fit in the elapsed time. */
+function stepAquatic(sim, entity, dtMs, runTick) {
+  entity.energy -= entity.stats.upkeepPerSec * (entity.fleeing ? AQUATIC_FLEE_UPKEEP : 1) * (dtMs / 1000)
+  if (entity.energy <= 0) {
+    entity.energy = 0
+    entity.alive = false
+    return
+  }
+  entity.tickAccum += dtMs
+  while (entity.tickAccum >= TICK_MS) {
+    entity.tickAccum -= TICK_MS
+    runTick(sim, entity)
+  }
+  advanceMotion(entity, dtMs)
+}
+
+// Only the patches that have actually been eaten are waiting to regrow, so
 // they are kept as a list rather than found by sweeping the map every frame -
 // on a 224-tile world that sweep was fifty thousand checks a frame to notice
-// a handful of apples.
-function regrowApples(sim) {
-  const queue = sim.regrowQueue
+// a handful of apples. Shared by the apple trees and the shallows, which
+// regrow on exactly the same rules at different rates.
+function regrowPatches(clock, queue, has, regrowAt) {
   if (!queue.length) return
-  const { hasApple, regrowAt } = sim
   let keep = 0
   for (let i = 0; i < queue.length; i++) {
     const idx = queue[i]
-    if (regrowAt[idx] >= 0 && sim.clock >= regrowAt[idx]) {
-      hasApple[idx] = 1
+    if (regrowAt[idx] >= 0 && clock >= regrowAt[idx]) {
+      has[idx] = 1
       regrowAt[idx] = -1
     } else if (regrowAt[idx] >= 0) {
       queue[keep++] = idx
@@ -1439,25 +2073,11 @@ function regrowApples(sim) {
 // times a minute.
 const RABBIT_TRAIT_KEYS = ['foodDrive', 'wanderer', 'boldness', 'restfulness', 'broodiness', 'searchDrive', 'skittishness', 'burrowInstinct', 'heedsAlarm']
 
-/** Population-wide averages of the fox genes, or null with no foxes alive -
- * null rather than zeros so the chart can tell "no foxes" apart from "foxes
- * whose genes all sit at 0". */
-function averageFoxGenes(foxes) {
-  if (foxes.length === 0) return null
-  const avg = {}
-  for (const key of FOX_GENE_KEYS) {
-    let sum = 0
-    for (const f of foxes) sum += f.genes[key]
-    avg[key] = sum / foxes.length
-  }
-  return avg
-}
-
 // The fox instincts worth a trend line, from the same net the inspector
 // draws (see foxInsight.js). This is the fox half of "watch selection
 // happen": a pack that starts out chasing everything and drifts toward
 // hunting only when hungry has been taught that by the rabbits.
-const FOX_TRAIT_KEYS = ['aggression', 'tracking', 'commitment', 'sociability', 'idleness', 'broodiness', 'patience']
+const FOX_TRAIT_KEYS = ['aggression', 'tracking', 'commitment', 'sociability', 'idleness', 'broodiness', 'patience', 'beachcombing']
 
 /** Population-wide averages of the fox brains' traits, or null with no foxes
  * alive - same null-vs-zeros reasoning as averageFoxGenes. */
@@ -1473,15 +2093,16 @@ function averageFoxTraits(foxes) {
   return avg
 }
 
-/** Population-wide averages of the rabbits' sense genes, or null with no
- * rabbits alive - same null-vs-zeros reasoning as averageFoxGenes. */
-function averageRabbitGenes(rabbits) {
-  if (rabbits.length === 0) return null
+/** Population-wide averages of an arbitrary gene vector, or null with nothing
+ * alive - null rather than zeros so a chart can tell "none left" apart from
+ * "all of them sit at 0". */
+function averageGenes(creatures, keys) {
+  if (creatures.length === 0) return null
   const avg = {}
-  for (const key of RABBIT_GENE_KEYS) {
+  for (const key of keys) {
     let sum = 0
-    for (const r of rabbits) sum += r.genes[key]
-    avg[key] = sum / rabbits.length
+    for (const c of creatures) sum += c.genes[key]
+    avg[key] = sum / creatures.length
   }
   return avg
 }
@@ -1493,18 +2114,26 @@ function sampleTraitHistory(sim) {
     tSec: sim.clock / 1000,
     population: rabbits.length,
     foxPopulation: foxes.length,
+    // The shoreline, as a trend: a fox population riding out a rabbit crash
+    // shows up here as the fish and crab curves being eaten down while the
+    // fox curve holds - which is the whole thing they were added for.
+    fishPopulation: sim.fish.length,
+    crabPopulation: sim.crabs.length,
     kills: sim.kills,
+    shoreCatches: sim.shoreCatches,
     minGen: null,
     maxGen: null,
     foxMinGen: null,
     foxMaxGen: null,
-    foxGenes: averageFoxGenes(foxes),
+    foxGenes: averageGenes(foxes, FOX_GENE_KEYS),
     foxTraits: averageFoxTraits(foxes),
+    fishGenes: averageGenes(sim.fish, FISH_GENE_KEYS),
+    crabGenes: averageGenes(sim.crabs, CRAB_GENE_KEYS),
     // The warren, as a population-level statistic: how much shelter exists
     // and how much of it is in use right now.
     burrows: sim.burrows.length,
     sheltered: rabbits.filter((r) => r.burrowId != null).length,
-    rabbitGenes: averageRabbitGenes(rabbits),
+    rabbitGenes: averageGenes(rabbits, RABBIT_GENE_KEYS),
   }
   for (const key of RABBIT_TRAIT_KEYS) sample[key] = 0
 
@@ -1579,8 +2208,20 @@ export function stepSimulation(sim, dtMs) {
   for (const rabbit of sim.rabbits) {
     if (rabbit.alive) stepRabbit(sim, rabbit, dtMs)
   }
-  // Foxes move after rabbits within a tick, so a chase resolves against
-  // where the rabbit actually ended up rather than where it started.
+  // Iterated by index rather than for..of: both lists are appended to during
+  // the loop (a fish spawning mid-tick), and a newborn should not also be
+  // stepped in the same frame it was born in.
+  const fishCount = sim.fish.length
+  for (let i = 0; i < fishCount; i++) {
+    if (sim.fish[i].alive) stepAquatic(sim, sim.fish[i], dtMs, runFishTick)
+  }
+  const crabCount = sim.crabs.length
+  for (let i = 0; i < crabCount; i++) {
+    if (sim.crabs[i].alive) stepAquatic(sim, sim.crabs[i], dtMs, runCrabTick)
+  }
+  // Foxes move after everything they eat within a tick, so a chase - or a
+  // grab at the water's edge - resolves against where the prey actually ended
+  // up rather than where it started.
   for (const fox of sim.foxes) {
     if (fox.alive) stepFox(sim, fox, dtMs)
   }
@@ -1593,9 +2234,12 @@ export function stepSimulation(sim, dtMs) {
     sim.rabbits = sim.rabbits.filter((r) => r.alive)
   }
   if (sim.foxes.some((f) => !f.alive)) sim.foxes = sim.foxes.filter((f) => f.alive)
-  const selectedList = sim.selectedKind === 'fox' ? sim.foxes : sim.rabbits
+  if (sim.fish.some((f) => !f.alive)) sim.fish = sim.fish.filter((f) => f.alive)
+  if (sim.crabs.some((c) => !c.alive)) sim.crabs = sim.crabs.filter((c) => c.alive)
+  const selectedList = creaturesOfKind(sim, sim.selectedKind)
   if (sim.selectedId != null && !selectedList.some((c) => c.id === sim.selectedId)) selectCreature(sim, null, null)
-  regrowApples(sim)
+  regrowPatches(sim.clock, sim.regrowQueue, sim.hasApple, sim.regrowAt)
+  regrowPatches(sim.clock, sim.forageQueue, sim.hasForage, sim.forageRegrowAt)
 
   sim.traitHistoryAccum += dtMs
   if (sim.traitHistoryAccum >= TRAIT_SAMPLE_MS) {

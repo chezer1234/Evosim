@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach } from 'vitest'
-import { TILE } from '../worldgen/mapgen.js'
+import { describe, it, expect, afterEach, beforeEach } from 'vitest'
+import { mulberry32, TILE } from '../worldgen/mapgen.js'
 import { createSimulation, islandPopulations, selectCreature, spawnFox, spawnRabbit, stepSimulation, isPlaceable, TICK_MS } from './simulation.js'
 import { analyseWaters, labelIslands, SHALLOW_TILES } from '../worldgen/islands.js'
 import { INPUT_SIZE, HIDDEN_SIZE, OUTPUT_SIZE } from './brain.js'
@@ -98,7 +98,7 @@ function zeroFoxBrain(overrides = {}) {
     w2: new Float32Array(FOX_HIDDEN_SIZE * FOX_OUTPUT_SIZE),
     b2: new Float32Array(FOX_OUTPUT_SIZE),
   }
-  // Output order: chase, sprint, track, group, rest, breed.
+  // Output order: chase, sprint, track, group, rest, breed, forage.
   for (const [idx, value] of Object.entries(overrides)) brain.b2[idx] = value
   return brain
 }
@@ -132,6 +132,32 @@ function makeOpenMap(size) {
 function runFor(sim, ms) {
   for (let elapsed = 0; elapsed < ms; elapsed += TICK_MS) stepSimulation(sim, TICK_MS)
 }
+
+// Every test in this file runs on a fixed random stream.
+//
+// The simulation reaches for Math.random on nearly every decision tick: the
+// search heading a creature wanders on when it can see nothing, the noise
+// input into both brains, mutation at every birth, and the roll on whether a
+// grab at the shoreline connects. So a test that runs the sim for four
+// seconds and asserts where something ended up is a *sampled* claim, not a
+// deterministic one - and a handful of them here quietly failed on one run in
+// twenty each, which reads as "CI is flaky" rather than as what it is.
+//
+// Pinning the stream makes them reproducible without weakening them: what is
+// under test is still the rule (a strong swimmer crosses a channel, a
+// lake-grade one does not, a fox smells nothing once the rabbit is
+// underground), and the seed only decides which particular minute of
+// wandering that rule is measured over. Same trick the ecosystem harness uses
+// (see scripts/ecosystem.mjs), for the same reason.
+const TEST_SEED = 20250817
+let realRandom
+beforeEach(() => {
+  realRandom = Math.random
+  Math.random = mulberry32(TEST_SEED)
+})
+afterEach(() => {
+  Math.random = realRandom
+})
 
 // Tiny hand-built map: an interior 5x5 patch of GRASS ringed by OCEAN, with
 // one FOREST/apple tile at (2,2). Bypasses generateMap's own randomness so
@@ -1013,7 +1039,12 @@ describe('swimming', () => {
   it('and stops being one once the foxes evolve the same gene', () => {
     const sim = createSimulation(makeLakeMap(15, 8, 11))
     spawnRabbit(sim, 10, 7, fearlessBrain(), 100, 0, rabbitGenes({ swimming: 1 }))
-    const fox = spawnFox(sim, 7, 7, hunterGenes({ speed: 1, swimming: 1 }), 90)
+    // An explicit hunting brain rather than a founder one: this test is about
+    // the swim gene, and a founder's brain is drawn from Math.random, so
+    // whether it felt like chasing was a coin toss weighted by
+    // CHASE_INITIAL_BIAS - which failed the run outright about one time in
+    // twenty. What the fox decides is foxBrain.test.js's business.
+    const fox = spawnFox(sim, 7, 7, hunterGenes({ speed: 1, swimming: 1 }), 90, 0, huntingBrain())
 
     let followedIn = false
     for (let elapsed = 0; elapsed < 4000; elapsed += TICK_MS) {

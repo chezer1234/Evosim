@@ -340,7 +340,9 @@ function carveLake(elevation, size, cx, cy, r, carvedMask) {
 
 /** Number of separate bodies of a given tile type - used to report the lake
  *  count off the finished map rather than off the number of carves attempted,
- *  so two carves that ran into each other are honestly one lake. */
+ *  so two carves that ran into each other are honestly one lake. Natural
+ *  basins are filled back in before this runs (see generateMap), so what it
+ *  counts is exactly what was asked for, or fewer. */
 function countBodies(tileType, size, type) {
   const seen = new Uint8Array(size * size)
   const stack = []
