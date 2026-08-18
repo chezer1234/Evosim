@@ -322,7 +322,7 @@ function ringIsLand(elevation, size, cx, cy, r) {
   return true
 }
 
-function carveLake(elevation, size, cx, cy, r) {
+function carveLake(elevation, size, cx, cy, r, carvedMask) {
   const x0 = Math.max(0, Math.floor(cx - r))
   const x1 = Math.min(size - 1, Math.ceil(cx + r))
   const y0 = Math.max(0, Math.floor(cy - r))
@@ -333,6 +333,7 @@ function carveLake(elevation, size, cx, cy, r) {
       if (dist >= r) continue
       const idx = y * size + x
       elevation[idx] = Math.min(elevation[idx], SEA_LEVEL - 0.05 * (1 - dist / r))
+      carvedMask[idx] = 1
     }
   }
 }
@@ -451,6 +452,11 @@ export function generateMap(settings) {
     if (!landByIsland.has(id)) landByIsland.set(id, [])
     landByIsland.get(id).push(i)
   }
+  // Tracks exactly which tiles were lowered by carveLake below, so the pass
+  // right after this loop can tell an intentional lake apart from a natural
+  // dip in the elevation noise that happens to sit below sea level without
+  // draining to the ocean (see there for why that distinction matters).
+  const carvedMask = new Uint8Array(size * size)
   for (const island of pre.islands) {
     if (island.area < LAKE_MIN_ISLAND_AREA) continue
     const tiles = landByIsland.get(island.id)
@@ -465,8 +471,24 @@ export function generateMap(settings) {
       const cy = (idx / size) | 0
       const r = 2 + rng() * (maxR - 2)
       if (!ringIsLand(elevation, size, cx, cy, r)) continue
-      carveLake(elevation, size, cx, cy, r)
+      carveLake(elevation, size, cx, cy, r, carvedMask)
       placed++
+    }
+  }
+
+  // The elevation noise can, on its own, dip below sea level somewhere that
+  // never reaches the map edge - an accidental puddle nobody asked for,
+  // indistinguishable from a real lake once it's just "water below sea level
+  // that isn't ocean". Left alone, that silently inflates lakeCount past
+  // whatever minLakes/maxLakes actually requested (and can add a "lake"
+  // even when maxLakes is 0). Anything below sea level that carveLake didn't
+  // put there gets nudged back above it - just past the beach band, so it
+  // reads as ordinary land rather than a suspiciously flat sliver at exactly
+  // sea level.
+  const postCarve = floodFillOcean(elevation, size)
+  for (let i = 0; i < elevation.length; i++) {
+    if (postCarve.isWater[i] && !postCarve.isOcean[i] && !carvedMask[i]) {
+      elevation[i] = SEA_LEVEL + BEACH_WIDTH
     }
   }
 

@@ -107,12 +107,31 @@ describe('generateMap', () => {
   }
 
   it('respects a custom lake range', () => {
-    const map = generateMap({ ...DEFAULT_SETTINGS, size: 48, minLakes: 2, maxLakes: 2 })
-    // Carving can fall short (each candidate needs dry land all round it, or
-    // it would be a bay rather than a lake) but never overshoot - and the
-    // count is of the lakes actually on the finished map, not of the carves
-    // attempted.
-    expect(map.lakeCount).toBeLessThanOrEqual(2)
+    // Run several times rather than once: generateMap self-seeds from
+    // Math.random, and lakeCount briefly could overshoot on an unlucky roll
+    // (see the next test) - a single run passing doesn't rule that out, only
+    // several in a row does.
+    for (let i = 0; i < 20; i++) {
+      const map = generateMap({ ...DEFAULT_SETTINGS, size: 48, minLakes: 2, maxLakes: 2 })
+      // Carving can fall short (each candidate needs dry land all round it,
+      // or it would be a bay rather than a lake) but never overshoot - and
+      // the count is of the lakes actually on the finished map, not of the
+      // carves attempted.
+      expect(map.lakeCount).toBeLessThanOrEqual(2)
+    }
+  })
+
+  it('never reports a lake when none was requested', () => {
+    // The elevation noise can dip below sea level somewhere that never
+    // drains to the map edge - an accidental puddle nobody asked for. Left
+    // alone that reads as "water below sea level that isn't ocean" exactly
+    // like a real lake, inflating lakeCount past what was actually
+    // requested (regression test for that: with maxLakes 0, nothing should
+    // ever get carved, so any lake at all here is one of those accidents).
+    for (let i = 0; i < 20; i++) {
+      const map = generateMap({ ...DEFAULT_SETTINGS, size: 64, minLakes: 0, maxLakes: 0 })
+      expect(map.lakeCount).toBe(0)
+    }
   })
 
   it('defaults to the one island the game has always had', () => {
