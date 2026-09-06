@@ -14,7 +14,7 @@ governs, where it can't drift out of date.
 
 ```
 src/
-  worldgen/       Procedural world generation and the Home → Settings → Game screens
+  worldgen/       Procedural world generation and the Home → Settings/Scenario → Game screens
     mapgen.js       Seeded Perlin fBm terrain, one falloff per island, lake carving, and
                      canvas rendering — including the zoomed-out atlas view
                      (framework-agnostic — no React here)
@@ -26,8 +26,13 @@ src/
     viewport.js     The map view's pan/zoom/pinch maths (framework-agnostic too)
     useIsCompact.js Media queries behind the responsive layout: compact chrome,
                      touch wording, and where the floating panels dock
+    usePersistentSettings.js  The localStorage-backed settings pattern both setup
+                     screens use (useMapSettings, useScenarioSettings)
     *.jsx            Screens and UI that drive mapgen.js
   sim/            The evolution simulation, layered on top of a generated map
+    scenario.js      The rules of a run: the player-facing dial set behind the
+                     Scenario screen, the presets, and createRules() - which turns
+                     one into the `sim.rules` every genome and brain reads
     net.js           The feedforward net both brains are built from: creation, the
                      forward pass, and gaussian mutation (shared so two species can
                      never inherit by subtly different rules)
@@ -87,6 +92,36 @@ population ever leaves the island it was born on. The tile grid is unchanged by 
 it: what moves smoothly is a separate visual position maintained by `motion.js`, which
 cannot affect where anything actually is.
 
+## Starting conditions
+
+Anything the player can set before a run lives in `sim/scenario.js`, and reaches the
+simulation exactly one way: `createSimulation(map, scenario)` resolves it into
+`sim.rules` once, and every founder built, cub mutated and apple eaten in that run
+reads those rules. A run cannot change its own physics halfway through.
+
+Three layers, and the split is the thing to keep straight:
+
+- **Baselines** stay in the file that owns the mechanic — `FOX_BASE` in `sim/fox.js`,
+  `RABBIT_BASE` in `sim/rabbit.js`, the founder biases in the two brain files,
+  `NET_BASE` in `sim/net.js` — next to the paragraph explaining why the number is what
+  it is. `scenario.js` imports them; it never restates one.
+- **A scenario** is the flat dial set: one number per slider, persisted to
+  localStorage, defined by the `SCENARIO_GROUPS` table (which is also what renders the
+  screen, so a dial cannot exist in the sim without being reachable in the UI).
+- **Rules** are what the sim reads. Every genome and brain function takes its fragment
+  as a trailing argument that defaults to the baseline, which is why nothing outside
+  the sim loop had to change when this landed.
+
+**Adding a dial:** add it to the right group in `SCENARIO_GROUPS` (label, range, and
+the plain-English hint), map it in `createRules`, and read it off `sim.rules` where the
+constant used to be. The default must reproduce today's balance — `scenario.test.js`
+asserts that, and every other test in the repo assumes it.
+
+**Presets are the product, not the sliders.** Twenty raw dials mostly produce dead
+islands. Anything added to `SCENARIO_PRESETS` has to be balance-checked headlessly
+before it ships — `make ecosystem-presets` runs the real sim across a batch of seeded
+islands for each one, and `sim/ecosystem.test.js` keeps a short version of that in CI.
+
 ## Setup
 
 ```bash
@@ -136,6 +171,8 @@ make ecosystem-boom         # heavier prey seeding, where predators can overshoo
 make ecosystem-shore        # foxes, fish and crabs and no rabbits at all
 make ecosystem-full         # all four species on one island
 npm run ecosystem -- --rabbits 20 --foxes 5 --fish 25 --crabs 25 --minutes 20 --runs 12 --seed 40
+npm run ecosystem -- --preset boom          # one of the Scenario screen's presets
+make ecosystem-presets                      # every preset, on identical seeds
 npm run ecosystem -- --json # machine-readable, for diffing two branches
 ```
 

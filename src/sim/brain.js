@@ -6,7 +6,7 @@
 // foxes leaves more copies of itself, and nothing else in here has an
 // opinion about which weights are good ones.
 
-import { createNet, forward, mutateNet, sigmoid } from './net.js'
+import { NET_BASE, createNet, forward, mutateNet, sigmoid } from './net.js'
 
 // bias, energy, dx/dy/dist-to-apple, onWater, noise, then dx/dy/dist to the
 // nearest fox the rabbit has *detected* (by sight within PREY_ALERT_RADIUS
@@ -53,18 +53,25 @@ const FLEE_INITIAL_BIAS = 2.0
 // mechanic would never show up in a run at all. Starts on, evolves off.
 const HIDE_INITIAL_BIAS = 1.8
 
-const INITIAL_BIAS = {
-  [SEARCH_DRIVE_OUTPUT]: SEARCH_DRIVE_INITIAL_BIAS,
-  [FLEE_OUTPUT]: FLEE_INITIAL_BIAS,
-  [HIDE_OUTPUT]: HIDE_INITIAL_BIAS,
+/** The three priors as named settings: the rabbit's half of what a player
+ * can set before a run starts (see ./scenario.js, which passes them back in
+ * as `sim.rules.rabbit.bias`), and the default createBrain falls back to. */
+export const RABBIT_BRAIN_BASE = {
+  bias: { search: SEARCH_DRIVE_INITIAL_BIAS, flee: FLEE_INITIAL_BIAS, hide: HIDE_INITIAL_BIAS },
 }
 
 export { WEIGHT_CLAMP } from './net.js'
 
 /** A fresh brain with random weights, using `rng` (a 0..1 generator, e.g.
- * `Math.random` or a seeded rng). */
-export function createBrain(rng) {
-  return createNet(BRAIN_SHAPE, rng, INITIAL_BIAS)
+ * `Math.random` or a seeded rng). `rules` is the rabbit's rules fragment
+ * (`sim.rules.rabbit`); only its founder biases are read here. */
+export function createBrain(rng, rules = RABBIT_BRAIN_BASE) {
+  const { search, flee, hide } = rules.bias
+  return createNet(BRAIN_SHAPE, rng, {
+    [SEARCH_DRIVE_OUTPUT]: search,
+    [FLEE_OUTPUT]: flee,
+    [HIDE_OUTPUT]: hide,
+  })
 }
 
 /**
@@ -87,8 +94,9 @@ export function think(brain, inputs) {
   }
 }
 
-/** A child brain: `brain`'s weights, each independently mutated with
- * probability net.js's MUTATION_RATE. */
-export function mutateBrain(brain, rng) {
-  return mutateNet(brain, rng)
+/** A child brain: `brain`'s weights, each independently mutated at the rate
+ * the run's shared brain rules set (`sim.rules.brain` - both species mutate
+ * by the same numbers, see net.js). */
+export function mutateBrain(brain, rng, rules = NET_BASE) {
+  return mutateNet(brain, rng, rules.mutation)
 }

@@ -12,6 +12,7 @@
 //   npm run ecosystem                    # the default 5v5 scatter
 //   npm run ecosystem -- --rabbits 20 --foxes 5 --minutes 20 --runs 12
 //   npm run ecosystem -- --json          # machine-readable summary
+//   npm run ecosystem -- --preset boom   # a starting-conditions preset (issue #18)
 //
 // Every run is *deterministic*: each one seeds Math.random (which the sim
 // and the map generator both draw from) with `--seed + run index`, so the
@@ -32,8 +33,21 @@ import {
   TICK_MS,
 } from '../src/sim/simulation.js'
 import { computeFoxTraits } from '../src/sim/foxInsight.js'
+import { SCENARIO_PRESETS } from '../src/sim/scenario.js'
 
-const DEFAULTS = { rabbits: 5, foxes: 5, fish: 0, crabs: 0, minutes: 15, runs: 8, size: 64, seed: 1, json: false }
+const DEFAULTS = { rabbits: 5, foxes: 5, fish: 0, crabs: 0, minutes: 15, runs: 8, size: 64, seed: 1, json: false, preset: 'balanced' }
+
+/** The starting-conditions preset named on the command line, as a scenario
+ * (see src/sim/scenario.js). Presets are the thing a player actually picks,
+ * so they are the thing that has to be balance-checked here rather than by
+ * eye - `make ecosystem-presets` runs every one of them on identical seeds. */
+function scenarioFor(preset) {
+  const found = SCENARIO_PRESETS.find((p) => p.key === preset)
+  if (!found) {
+    throw new Error(`unknown preset ${preset} (expected ${SCENARIO_PRESETS.map((p) => p.key).join(', ')})`)
+  }
+  return found.scenario
+}
 
 function parseArgs(argv) {
   const opts = { ...DEFAULTS }
@@ -45,6 +59,13 @@ function parseArgs(argv) {
     }
     const key = arg.replace(/^--/, '')
     if (!(key in opts)) throw new Error(`unknown option ${arg} (expected ${Object.keys(opts).map((k) => `--${k}`).join(', ')})`)
+    // Every other flag is a count; --preset names one of the scenarios the
+    // app itself offers, so it is the one that stays a string.
+    if (key === 'preset') {
+      opts.preset = argv[++i]
+      scenarioFor(opts.preset)
+      continue
+    }
     opts[key] = Number(argv[++i])
     if (Number.isNaN(opts[key])) throw new Error(`--${key} needs a number`)
   }
@@ -78,13 +99,13 @@ function meanGene(creatures, key) {
 
 /** One run. Seeds the global rng first, so the map, both species' brains and
  * every decision in the run follow from `seed` alone. */
-export function runScenario({ rabbits, foxes, fish, crabs, minutes, size, seed }) {
+export function runScenario({ rabbits, foxes, fish, crabs, minutes, size, seed, preset = 'balanced' }) {
   const rng = mulberry32(seed)
   const realRandom = Math.random
   Math.random = rng
   try {
     const map = generateMap({ ...DEFAULT_SETTINGS, size })
-    const sim = createSimulation(map)
+    const sim = createSimulation(map, scenarioFor(preset))
     for (const [x, y] of scatter(map, 'rabbit', rabbits, rng)) spawnRabbit(sim, x, y)
     for (const [x, y] of scatter(map, 'fox', foxes, rng)) spawnFox(sim, x, y)
     for (const [x, y] of scatter(map, 'fish', fish, rng)) spawnFish(sim, x, y)
@@ -108,6 +129,7 @@ export function runScenario({ rabbits, foxes, fish, crabs, minutes, size, seed }
     }
     return {
       seed,
+      preset,
       rabbits: sim.rabbits.length,
       foxes: sim.foxes.length,
       fish: sim.fish.length,
@@ -195,7 +217,10 @@ function main() {
   if (opts.fish) seeded.push(`${opts.fish} fish`)
   if (opts.crabs) seeded.push(`${opts.crabs} crabs`)
   console.log('—'.repeat(80))
-  console.log(`${seeded.join(' + ')}, ${opts.size}x${opts.size}, ${opts.minutes} sim-minutes, ${s.runs} runs from seed ${opts.seed}`)
+  console.log(
+    `${seeded.join(' + ')}, ${opts.size}x${opts.size}, ${opts.minutes} sim-minutes, ${s.runs} runs from seed ${opts.seed}` +
+      `, "${SCENARIO_PRESETS.find((p) => p.key === opts.preset).label}" starting conditions`,
+  )
   console.log(`rabbits left ${s.rabbitsLeft.toFixed(1)} (extinct in ${s.rabbitExtinctions}/${s.runs})`)
   console.log(`foxes   left ${s.foxesLeft.toFixed(1)} (extinct in ${s.foxExtinctions}/${s.runs}), peak ${s.peakFoxes.toFixed(1)}`)
   if (opts.fish || opts.crabs) {

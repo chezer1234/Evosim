@@ -22,6 +22,7 @@
 
 import { describe, it, expect } from 'vitest'
 import { runBatch } from '../../scripts/ecosystem.mjs'
+import { SCENARIO_PRESETS } from './scenario.js'
 
 // A modest founder population on a default island: the scenario you get by
 // opening the app, picking a species and hitting scatter.
@@ -120,3 +121,34 @@ describe('an island with a shoreline and no rabbits at all', () => {
     expect(summary.fishLeft).toBeGreaterThan(SHORELINE_ONLY.fish)
   })
 })
+
+// Every starting-conditions preset the Scenario screen offers (issue #18).
+//
+// A preset is a promise: pick this one, press play, and you get a world worth
+// watching. The dials behind them are powerful enough to make an island where
+// the foxes starve by minute two or the rabbits are gone by minute three, and
+// the difference between the two is nothing a unit test can see - so each one
+// gets a short seeded batch here, on the same loose "not reliably wiped out"
+// bar the batches above use. Longer runs, and the numbers a preset is
+// actually tuned against, come from `make ecosystem-presets`.
+describe.each(SCENARIO_PRESETS.map((preset) => [preset.key, preset.label]))(
+  'the %s starting-conditions preset',
+  (preset, label) => {
+    const runs = 3
+    const { summary } = runBatch({ ...SCATTER, preset, minutes: 6, runs })
+
+    it(`leaves "${label}" an island both species are still on`, () => {
+      expect(summary.rabbitExtinctions).toBeLessThanOrEqual(1)
+      expect(summary.foxExtinctions).toBeLessThanOrEqual(1)
+      expect(summary.bothAlive).toBeGreaterThanOrEqual(runs - 1)
+    })
+
+    it(`runs an evolutionary loop under "${label}"`, () => {
+      // Whatever else a preset does to the balance, it has to leave a sim
+      // where things are eaten and born - a frozen population would pass the
+      // survival check above while being nothing anyone wants to watch.
+      expect(summary.kills).toBeGreaterThan(0)
+      expect(summary.maxRabbitGen).toBeGreaterThan(0)
+    })
+  },
+)

@@ -9,7 +9,7 @@
 # docs/DEVELOPMENT.md.
 
 .DEFAULT_GOAL := help
-.PHONY: help install dev build preview lint test test-watch check ecosystem ecosystem-scatter ecosystem-boom ecosystem-shore ecosystem-full ecosystem-json
+.PHONY: help install dev build preview lint test test-watch check ecosystem ecosystem-scatter ecosystem-boom ecosystem-shore ecosystem-full ecosystem-presets ecosystem-json
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -56,6 +56,12 @@ ecosystem-shore: ## Foxes, fish and crabs and no rabbits at all - can a pack liv
 
 ecosystem-full: ## All four species together: the whole food web on one island
 	npm run ecosystem -- --rabbits 8 --foxes 4 --fish 25 --crabs 25 --minutes 15 --runs 8
+
+ecosystem-presets: ## Every starting-conditions preset (issue #18) on identical seeds
+	@for preset in balanced predator boom fast; do \
+		npm run --silent ecosystem -- --preset $$preset --rabbits 8 --foxes 4 --minutes 12 --runs 8 | tail -6; \
+		echo; \
+	done
 
 ecosystem-json: ## Machine-readable summary, for diffing two branches
 	@npm run --silent ecosystem -- --json

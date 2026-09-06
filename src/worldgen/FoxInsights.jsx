@@ -5,7 +5,7 @@
 // rabbit panel interprets its own (sim/foxInsight.js) - trait bars, a
 // plain-English blurb, then the literal wiring.
 
-import { FOX_ENERGY_MAX, FOX_GENE_META, describeFox, describeFoxStats, foxMenace } from '../sim/fox.js'
+import { FOX_ENERGY_MAX, FOX_GENE_META, describeFox, foxMenace } from '../sim/fox.js'
 import { FOX_BRAIN_SHAPE } from '../sim/foxBrain.js'
 import { FOX_INPUT_LABELS, FOX_OUTPUT_LABELS, FOX_TRAIT_META } from '../sim/foxInsight.js'
 import BrainNetworkDiagram from './BrainNetworkDiagram.jsx'
@@ -83,7 +83,7 @@ export default function FoxInsights({ selected, onClose }) {
           <p className="text-xs leading-relaxed text-neutral-300">{describeFox(selected.genes)}</p>
 
           <ul className="flex list-disc flex-col gap-1 pl-4 text-[11px] leading-relaxed text-neutral-500">
-            {describeFoxStats(selected.genes).map((note) => (
+            {selected.statNotes.map((note) => (
               <li key={note}>{note}</li>
             ))}
           </ul>

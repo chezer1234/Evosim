@@ -37,6 +37,16 @@ const FOUNDER_MEAN = { swimming: 0.28 }
 const MUTATION_RATE = 0.3 // per gene, per birth
 const MUTATION_STDDEV = 0.09
 
+/** The tunable half, as one object - the rabbit's half of what a player can
+ * set before a run starts (see ./scenario.js, and FOX_BASE in ./fox.js for
+ * the same idea on the other species). Also the default for the two
+ * functions below, so a caller without a simulation gets today's balance. */
+export const RABBIT_BASE = {
+  founderMean: FOUNDER_MEAN,
+  founderSpread: FOUNDER_SPREAD,
+  mutation: { rate: MUTATION_RATE, stddev: MUTATION_STDDEV },
+}
+
 function clamp01(v) {
   return Math.min(1, Math.max(0, v))
 }
@@ -49,22 +59,24 @@ function gaussian(rng) {
   return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2)
 }
 
-/** A founder rabbit's sense genes, using `rng` (a 0..1 generator). */
-export function createRabbitGenes(rng) {
+/** A founder rabbit's sense genes, using `rng` (a 0..1 generator) and the
+ * run's rabbit rules (`sim.rules.rabbit`, see ./scenario.js). */
+export function createRabbitGenes(rng, rules = RABBIT_BASE) {
   const genes = {}
   for (const key of RABBIT_GENE_KEYS) {
-    const mean = FOUNDER_MEAN[key] ?? 0.5
-    genes[key] = clamp01(mean + (rng() * 2 - 1) * FOUNDER_SPREAD)
+    const mean = rules.founderMean[key] ?? 0.5
+    genes[key] = clamp01(mean + (rng() * 2 - 1) * rules.founderSpread)
   }
   return genes
 }
 
 /** A child's sense genes: the parent's, each independently mutated with
- * probability MUTATION_RATE. Never mutates the parent in place. */
-export function mutateRabbitGenes(genes, rng) {
+ * probability `rules.mutation.rate`. Never mutates the parent in place. */
+export function mutateRabbitGenes(genes, rng, rules = RABBIT_BASE) {
+  const { rate, stddev } = rules.mutation
   const out = {}
   for (const key of RABBIT_GENE_KEYS) {
-    out[key] = rng() < MUTATION_RATE ? clamp01(genes[key] + gaussian(rng) * MUTATION_STDDEV) : genes[key]
+    out[key] = rng() < rate ? clamp01(genes[key] + gaussian(rng) * stddev) : genes[key]
   }
   return out
 }

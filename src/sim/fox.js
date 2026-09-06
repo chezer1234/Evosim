@@ -58,6 +58,10 @@ const FOUNDER_SPREAD = 0.34 // +/- around the gene's founder mean
 // genes could drift anywhere interesting. They still start below the
 // midpoint - a fresh fox is not a match for a running rabbit in a straight
 // line - just not hopeless.
+//
+// These four are also the ones the player can move before a run (issue #18,
+// see ./scenario.js): what a founder pack is built like is the single
+// clearest lever on how an island goes, and it is only a prior either way.
 const FOUNDER_MEAN = {
   speed: 0.4, // slower than a bolting rabbit; sprinting still has to be evolved for
   metabolism: 0.5,
@@ -84,22 +88,26 @@ function gaussian(rng) {
   return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2)
 }
 
-/** A founder fox's genes, using `rng` (a 0..1 generator). */
-export function createFoxGenes(rng) {
+/** A founder fox's genes, using `rng` (a 0..1 generator). `rules` is the
+ * fox's rules fragment (`sim.rules.fox`, see ./scenario.js) - the founder
+ * means and spread the player set before pressing play, defaulting to the
+ * baseline above. */
+export function createFoxGenes(rng, rules = FOX_BASE) {
   const genes = {}
   for (const key of FOX_GENE_KEYS) {
-    const mean = FOUNDER_MEAN[key] ?? 0.5
-    genes[key] = clamp01(mean + (rng() * 2 - 1) * FOUNDER_SPREAD)
+    const mean = rules.founderMean[key] ?? 0.5
+    genes[key] = clamp01(mean + (rng() * 2 - 1) * rules.founderSpread)
   }
   return genes
 }
 
 /** A cub's genes: the parent's, each independently mutated with probability
- * MUTATION_RATE. Never mutates the parent in place. */
-export function mutateFoxGenes(genes, rng) {
+ * `rules.mutation.rate`. Never mutates the parent in place. */
+export function mutateFoxGenes(genes, rng, rules = FOX_BASE) {
+  const { rate, stddev } = rules.mutation
   const out = {}
   for (const key of FOX_GENE_KEYS) {
-    out[key] = rng() < MUTATION_RATE ? clamp01(genes[key] + gaussian(rng) * MUTATION_STDDEV) : genes[key]
+    out[key] = rng() < rate ? clamp01(genes[key] + gaussian(rng) * stddev) : genes[key]
   }
   return out
 }
@@ -176,16 +184,36 @@ const BREED_ENERGY = [165, 140] // by fecundity: eager foxes breed at lower rese
 const GESTATION_MS = [58000, 30000] // by fecundity
 
 /**
- * Everything the sim actually reads, derived from the 0..1 genes. Pure and
- * cheap - called per decision tick rather than cached, so a gene edit can
- * never go stale.
+ * The tunable half of everything above, as one object: the numbers a player
+ * can move before a run starts (see ./scenario.js, which scales these into
+ * `sim.rules.fox`). The reasoning for each still lives beside the constant
+ * it came from - this is a handle on them, not a second copy.
+ *
+ * It is also the default for every function here, so a caller with no
+ * simulation to hand - a test, an insight panel - gets today's balance
+ * without having to build a scenario first.
+ */
+export const FOX_BASE = {
+  founderMean: FOUNDER_MEAN,
+  founderSpread: FOUNDER_SPREAD,
+  mutation: { rate: MUTATION_RATE, stddev: MUTATION_STDDEV },
+  killEnergy: KILL_ENERGY,
+  upkeepPerSec: UPKEEP_PER_SEC,
+  breedEnergy: BREED_ENERGY,
+  gestationMs: GESTATION_MS,
+}
+
+/**
+ * Everything the sim actually reads, derived from the 0..1 genes and the
+ * run's rules (`sim.rules.fox`). Pure and cheap - called per decision tick
+ * rather than cached, so a gene edit can never go stale.
  *
  * The load-bearing trade-off lives in `upkeepPerSec`: big eyes, fast legs
  * and a good coat all cost energy to run, so a fox that maxes every gene
  * starves between kills. That surcharge is what stops evolution from just
  * driving every dial to 1.
  */
-export function foxStats(genes) {
+export function foxStats(genes, rules = FOX_BASE) {
   // Speed is priced quadratically rather than linearly (issue #14): a
   // plodding fox pays about what it always did, but every step toward a
   // full sprint gene costs disproportionately more, so "fast" has to be
@@ -207,8 +235,8 @@ export function foxStats(genes) {
     // simulation.js). A fully camouflaged fox is on top of its prey before
     // the rabbit reacts at all.
     stealthFactor: lerp(1, 0.22, genes.camouflage),
-    energyPerKill: lerp(KILL_ENERGY[0], KILL_ENERGY[1], genes.metabolism),
-    upkeepPerSec: lerp(UPKEEP_PER_SEC[0], UPKEEP_PER_SEC[1], genes.metabolism) * geneCost,
+    energyPerKill: lerp(rules.killEnergy[0], rules.killEnergy[1], genes.metabolism),
+    upkeepPerSec: lerp(rules.upkeepPerSec[0], rules.upkeepPerSec[1], genes.metabolism) * geneCost,
     sprintUpkeepMultiplier: SPRINT_UPKEEP_MULTIPLIER,
     restUpkeepFactor: REST_UPKEEP_FACTOR,
     maxSprintTicks: Math.round(lerp(SPRINT_TICKS[0], SPRINT_TICKS[1], genes.stamina)),
@@ -218,8 +246,8 @@ export function foxStats(genes) {
     // brain's call (see GROUP_OUTPUT in foxBrain.js).
     packRadius: lerp(6, 18, genes.packTendency),
     packSpeedBonus: lerp(0, 0.3, genes.packTendency),
-    breedEnergy: lerp(BREED_ENERGY[0], BREED_ENERGY[1], genes.fecundity),
-    gestationMs: lerp(GESTATION_MS[0], GESTATION_MS[1], genes.fecundity),
+    breedEnergy: lerp(rules.breedEnergy[0], rules.breedEnergy[1], genes.fecundity),
+    gestationMs: lerp(rules.gestationMs[0], rules.gestationMs[1], genes.fecundity),
     // Water (see water.js). A fox that cannot swim is stopped dead by a lake
     // shore, which is precisely what makes swimming worth a rabbit evolving:
     // the refuge only works while the predator is still landlocked.
@@ -268,8 +296,8 @@ export function describeFox(genes) {
 }
 
 /** Short "what this gene is doing right now" notes for the inspector. */
-export function describeFoxStats(genes) {
-  const s = foxStats(genes)
+export function describeFoxStats(genes, rules = FOX_BASE) {
+  const s = foxStats(genes, rules)
   return [
     `Sees prey ${s.visionRadius.toFixed(1)} tiles off, or only ${(s.visionRadius * FOREST_VISION_FACTOR).toFixed(1)} under forest cover - but smells it at ${s.scentRadius.toFixed(1)} tiles, and still ${(s.scentRadius * FOREST_SCENT_FACTOR).toFixed(1)} in the trees, which is what makes woodland huntable at all.`,
     `Closes at ${s.sprintTilesPerTick.toFixed(2)} tiles/tick flat out (a running rabbit does 1.00), and rabbits only notice it at ${Math.round(s.stealthFactor * 100)}% of their normal spotting range.`,
