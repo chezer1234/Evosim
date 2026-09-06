@@ -53,6 +53,10 @@ src/
     motion.js        The visual layer over the tile grid: interpolated positions,
                      hop/glide easing, and the pose (lift, shadow, stride, stroke)
                      the renderer draws each frame
+    grid.js          The uniform spatial index every "nearest thing within R" sense
+                     queries, so a prey boom costs work per *neighbour* rather than
+                     per creature in the world (framework-agnostic, and the reason
+                     the sim stopped being quadratic in population)
     simulation.js    Entity state, every species' per-tick decision loops, predation,
                      hearing/alarm calls, scent, sheltering, foraging the tideline,
                      energy/lifecycle, breeding
@@ -144,6 +148,15 @@ runs are **reproducible** and two configurations can be compared on identical is
 That matters more than it sounds: outcomes vary so much between islands that an
 unseeded eight-run A/B is mostly measuring the map, not the change. Reproduce a single
 interesting run with `npm run ecosystem -- --seed <n> --runs 1`.
+
+That reproducibility is also the strongest tool available for a change that is *not*
+meant to alter behaviour. A refactor of the decision loops can be held to a far higher
+bar than "the numbers still look reasonable": capture `--json` on both sides and diff
+them, and a pure change comes out byte-identical - same seed, same island, same
+outcome. The spatial index (`sim/grid.js`) was landed that way. Anything that trips it
+is worth understanding before it is accepted: floating-point arithmetic reordered, a
+`Math.random()` call added, removed or moved, or a scan whose result depended on list
+order without saying so.
 
 **Run it for anything touching energy, breeding, the senses or the decision loops.**
 It is what caught the fox rebalance overshooting, a regression where peacetime digging

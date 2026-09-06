@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach, beforeEach } from 'vitest'
 import { mulberry32, TILE } from '../worldgen/mapgen.js'
-import { createSimulation, islandPopulations, selectCreature, spawnFox, spawnRabbit, stepSimulation, isPlaceable, TICK_MS } from './simulation.js'
+import { createSimulation, creatureGrid, creaturesOfKind, islandPopulations, moveCreature, selectCreature, spawnFox, spawnRabbit, stepSimulation, isPlaceable, TICK_MS } from './simulation.js'
+import { forEachWithin } from './grid.js'
 import { analyseWaters, labelIslands, SHALLOW_TILES } from '../worldgen/islands.js'
 import { INPUT_SIZE, HIDDEN_SIZE, OUTPUT_SIZE } from './brain.js'
 import { FOX_INPUT_SIZE, FOX_HIDDEN_SIZE, FOX_OUTPUT_SIZE } from './foxBrain.js'
@@ -557,7 +558,7 @@ describe('foxes hunting by scent', () => {
     // point this fox at its dinner is the smell.
     const rabbit = spawnRabbit(sim, 26, 20, fearlessBrain(), 100)
     const fox = spawnFox(sim, 20, 20, foxGenes({ vision: 1, speed: 0.6 }), 120, 0, trackingBrain())
-    rabbit.x = 30 // 10 tiles: inside a vision-1 fox's nose, outside nothing else
+    moveCreature(sim, rabbit, 30, rabbit.y) // 10 tiles: inside a vision-1 fox's nose, outside nothing else
     const gapBefore = Math.hypot(rabbit.x - fox.x, rabbit.y - fox.y)
 
     runFor(sim, 4000)
@@ -1306,6 +1307,62 @@ describe('smooth motion', () => {
         expect(Math.abs(c.renderY - c.y)).toBeLessThanOrEqual(2.001)
       }
     }
+  })
+})
+
+describe('the spatial index', () => {
+  // The index behind every "nearest thing within R" sense (see sim/grid.js).
+  // Its failure mode is not a crash: it is a fox that cannot see a rabbit
+  // standing next to it, because the rabbit's bucket still says where it
+  // used to be. So what these check is the invariant itself - that after a
+  // busy run the index and the world still agree about where everything is.
+
+  /** Every creature the index offers up at its own tile. */
+  function indexedAt(sim, kind, x, y) {
+    const ids = []
+    forEachWithin(creatureGrid(sim, kind), x, y, 0, (c) => ids.push(c.id))
+    return ids
+  }
+
+  function expectInSync(sim) {
+    for (const kind of ['rabbit', 'fox', 'fish', 'crab']) {
+      for (const c of creaturesOfKind(sim, kind)) {
+        expect(indexedAt(sim, kind, c.x, c.y)).toContain(c.id)
+      }
+    }
+  }
+
+  it('still agrees with the world after a run with births, hunts and deaths', () => {
+    const sim = createSimulation(makeOpenMap(48))
+    for (let i = 0; i < 12; i++) spawnRabbit(sim, 10 + i, 20, roamingBrain(), 100)
+    for (let i = 0; i < 3; i++) spawnFox(sim, 30, 12 + i * 4, foxGenes({ speed: 0.9 }), 150, 0, huntingBrain())
+
+    runFor(sim, 60000)
+
+    expect(sim.kills).toBeGreaterThan(0) // the death sweep actually ran
+    expectInSync(sim)
+  })
+
+  it('follows a rabbit that comes up at the far end of the warren', () => {
+    // The one position change that is not a step: a rabbit with a fox on its
+    // entrance surfaces at a linked burrow instead, tiles away.
+    const sim = createSimulation(makeOpenMap(48))
+    const rabbit = spawnRabbit(sim, 20, 20, burrowingBrain(), 100)
+    moveCreature(sim, rabbit, 26, 20)
+    expectInSync(sim)
+    expect(indexedAt(sim, 'rabbit', 20, 20)).toEqual([])
+  })
+
+  it('drops the dead, so a fox stops smelling a rabbit it has already eaten', () => {
+    const sim = createSimulation(makeOpenMap(48))
+    const rabbit = spawnRabbit(sim, 20, 20, fearlessBrain(), 100)
+    spawnFox(sim, 20, 21, foxGenes({ speed: 0.9, vision: 1 }), 150, 0, huntingBrain())
+
+    runFor(sim, 2000)
+
+    expect(rabbit.alive).toBe(false)
+    expect(sim.rabbits).toEqual([])
+    expect(indexedAt(sim, 'rabbit', rabbit.x, rabbit.y)).toEqual([])
   })
 })
 
