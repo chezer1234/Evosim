@@ -132,6 +132,15 @@ export function alarmReach(callerStats, listenerStats) {
   return (callerStats.callRadius + listenerStats.hearingRadius) / 2
 }
 
+/** The furthest away a rabbit could possibly be and still be heard by this
+ * listener: the loudest voice the gene pool allows, against these ears. The
+ * spatial index needs it to know how big a box to search before it can start
+ * discarding candidates (see hearCalls in ./simulation.js), and it lives here
+ * so that widening CALL_TILES widens the search with it. */
+export function maxAlarmReach(listenerStats) {
+  return (CALL_TILES[1] + listenerStats.hearingRadius) / 2
+}
+
 /** Short "what these ears are doing" notes for the inspector. */
 export function describeRabbitSenses(genes) {
   const s = rabbitStats(genes)

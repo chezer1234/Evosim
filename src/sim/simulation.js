@@ -31,8 +31,9 @@ import { createBrain, mutateBrain, think } from './brain.js'
 import { computeTraits } from './brainInsight.js'
 import { createFoxBrain, foxThink, mutateFoxBrain } from './foxBrain.js'
 import { computeFoxTraits } from './foxInsight.js'
+import { createGrid, forEachWithin, gridInsert, gridMoved, gridRebuild, someWithin } from './grid.js'
 import { FOREST_SCENT_FACTOR, FOREST_VISION_FACTOR, FOX_ENERGY_MAX, FOX_GENE_KEYS, createFoxGenes, foxStats, mutateFoxGenes } from './fox.js'
-import { RABBIT_GENE_KEYS, alarmReach, createRabbitGenes, mutateRabbitGenes, rabbitStats } from './rabbit.js'
+import { RABBIT_GENE_KEYS, alarmReach, createRabbitGenes, maxAlarmReach, mutateRabbitGenes, rabbitStats } from './rabbit.js'
 import { FISH_ENERGY_MAX, FISH_GENE_KEYS, createFishGenes, fishStats, mutateFishGenes } from './fish.js'
 import { CRAB_ENERGY_MAX, CRAB_GENE_KEYS, crabStats, createCrabGenes, mutateCrabGenes } from './crab.js'
 import {
@@ -158,6 +159,13 @@ const FOX_SPRINT_RANGE = 5 // only worth sprinting once the prey is this close
 // following a distant scent casts about the way a real one does instead of
 // walking a laser-straight line to its dinner.
 const SCENT_JITTER = 1.1
+// What a rabbit's own behaviour does to how far it can be smelled (see
+// rabbitScentFactor). SCENT_MAX is the worst case a fox's nose has to search
+// out to before it can start discarding candidates - a bolting rabbit in the
+// open, since cover only ever masks a scent (FOREST_SCENT_FACTOR < 1).
+const SCENT_RUNNING = 1.3
+const SCENT_RESTING = 0.55
+const SCENT_MAX = Math.max(SCENT_RUNNING, SCENT_RESTING, 1)
 // Below this, a fox will not lie up however strongly its brain votes for it.
 // Same reasoning as the rabbits' hunger override: resting finds nothing, so
 // a lineage that naps through starvation would be selected out by dying in
@@ -203,6 +211,12 @@ const FOX_NOISE_FEEDING = 0.6
 // small warren's breeding just by existing near it.
 const FOX_NOISE_RESTING = 0.3
 const FOX_NOISE_PROWLING = [0.5, 1.0] // by speed gene: a slow stalker is quiet
+// The loudest a fox can be, whatever it is doing. A rabbit's hearing scan
+// searches its ears' range scaled by this, so no fox it could possibly hear
+// falls outside the box. Derived rather than written down as 1.25, so
+// turning any one of the noise levels up widens the search with it instead
+// of quietly starting to miss foxes.
+const FOX_NOISE_MAX = Math.max(FOX_NOISE_SPRINTING, FOX_NOISE_RESTING, FOX_NOISE_FEEDING, FOX_NOISE_PROWLING[1])
 
 // ========================= Alarm calls / burrows =========================
 // A rabbit that detects a fox calls it - automatically, not as an evolved
@@ -356,6 +370,16 @@ export function createSimulation(map) {
     // the fox's scans want to ask about fish and crabs separately.
     fish: [],
     crabs: [],
+    // The spatial index over those four lists (see ./grid.js), one per
+    // species because every query asks about exactly one of them. Kept in
+    // step with the lists by moveCreature/spawn/the death sweep, and read by
+    // every "nearest thing within R" sense in this file - which is what
+    // stops a warren of three hundred rabbits from costing ninety thousand
+    // distance checks a tick (issue #21).
+    rabbitGrid: createGrid(map.size),
+    foxGrid: createGrid(map.size),
+    fishGrid: createGrid(map.size),
+    crabGrid: createGrid(map.size),
     shoreDist,
     canHaveForage,
     hasForage: canHaveForage.slice(),
@@ -411,6 +435,33 @@ export function creaturesOfKind(sim, kind) {
   return sim.rabbits
 }
 
+/** The spatial index over that list (see ./grid.js). Paired with
+ * creaturesOfKind above and kept next to it deliberately: a list and its
+ * index that disagree about which species they hold is the one way this can
+ * go quietly wrong. */
+export function creatureGrid(sim, kind) {
+  if (kind === 'fox') return sim.foxGrid
+  if (kind === 'fish') return sim.fishGrid
+  if (kind === 'crab') return sim.crabGrid
+  return sim.rabbitGrid
+}
+
+/**
+ * Put a creature on a tile.
+ *
+ * The *only* supported way to change a creature's position, and the reason
+ * the spatial grid can be trusted: a raw `entity.x = ...` leaves the index
+ * pointing at the bucket the creature used to be in, and the symptom of
+ * that is not a crash but a fox that cannot see a rabbit standing next to
+ * it. Every step, slide and burrow-mouth teleport in this file goes through
+ * here.
+ */
+export function moveCreature(sim, entity, x, y) {
+  entity.x = x
+  entity.y = y
+  gridMoved(creatureGrid(sim, entity.kind), entity)
+}
+
 /** Select a creature (or nothing) for the inspector panel. */
 export function selectCreature(sim, kind, id) {
   sim.selectedKind = id == null ? null : kind
@@ -421,6 +472,7 @@ export function spawnRabbit(sim, x, y, brain, startEnergy = ENERGY_START, genera
   const senseGenes = genes || createRabbitGenes(Math.random)
   const rabbit = {
     id: nextRabbitId++,
+    kind: 'rabbit', // the list and the index it lives in (see creaturesOfKind)
     x,
     y,
     energy: startEnergy,
@@ -489,6 +541,7 @@ export function spawnRabbit(sim, x, y, brain, startEnergy = ENERGY_START, genera
   // the tile it was spawned on.
   attachMotion(rabbit, Math.random() * Math.PI * 2)
   sim.rabbits.push(rabbit)
+  gridInsert(sim.rabbitGrid, rabbit)
   return rabbit
 }
 
@@ -498,6 +551,7 @@ export function spawnRabbit(sim, x, y, brain, startEnergy = ENERGY_START, genera
 export function spawnFox(sim, x, y, genes, startEnergy = FOX_START_ENERGY, generation = 0, brain = null) {
   const fox = {
     id: nextFoxId++,
+    kind: 'fox', // the list and the index it lives in (see creaturesOfKind)
     x,
     y,
     energy: startEnergy,
@@ -552,6 +606,7 @@ export function spawnFox(sim, x, y, genes, startEnergy = FOX_START_ENERGY, gener
   attachMotion(fox, fox.heading)
   fox.sprintBudget = foxStats(fox.genes).maxSprintTicks
   sim.foxes.push(fox)
+  gridInsert(sim.foxGrid, fox)
   return fox
 }
 
@@ -564,6 +619,7 @@ export function spawnFish(sim, x, y, genes, startEnergy = FISH_START_ENERGY, gen
   const fishGenes = genes || createFishGenes(Math.random)
   const fish = {
     id: nextFishId++,
+    kind: 'fish', // the list and the index it lives in (see creaturesOfKind)
     x,
     y,
     energy: startEnergy,
@@ -592,6 +648,7 @@ export function spawnFish(sim, x, y, genes, startEnergy = FISH_START_ENERGY, gen
   }
   attachMotion(fish, fish.searchHeading)
   sim.fish.push(fish)
+  gridInsert(sim.fishGrid, fish)
   return fish
 }
 
@@ -600,6 +657,7 @@ export function spawnCrab(sim, x, y, genes, startEnergy = CRAB_START_ENERGY, gen
   const crabGenes = genes || createCrabGenes(Math.random)
   const crab = {
     id: nextCrabId++,
+    kind: 'crab', // the list and the index it lives in (see creaturesOfKind)
     x,
     y,
     energy: startEnergy,
@@ -619,6 +677,7 @@ export function spawnCrab(sim, x, y, genes, startEnergy = CRAB_START_ENERGY, gen
   }
   attachMotion(crab, crab.searchHeading)
   sim.crabs.push(crab)
+  gridInsert(sim.crabGrid, crab)
   return crab
 }
 
@@ -648,6 +707,26 @@ function findNearestApple(sim, x, y) {
   return bestX < 0 ? null : { x: bestX, y: bestY, dist: bestDist }
 }
 
+/**
+ * Does a candidate at `dist` beat the incumbent at `bestDist`?
+ *
+ * Every sense below used to be a walk down sim.rabbits or sim.foxes keeping
+ * the first *strictly* nearer candidate, so two creatures exactly the same
+ * distance away resolved in favour of whichever was spawned first. That is
+ * not an edge case here - everything stands on integer tile coordinates, so
+ * exact ties are routine - and the spatial index visits its buckets in
+ * whatever order they happen to be packed in, which is not spawn order.
+ *
+ * Comparing (distance, id) as a pair restores the old answer exactly: ids
+ * ascend with spawn order and the end-of-tick sweep preserves it, so the
+ * lowest id in range *is* the one the array scan would have reached first.
+ * That is what lets this refactor be checked against seeded runs for
+ * identical output rather than merely similar output (issue #21).
+ */
+function beats(dist, id, bestDist, bestId) {
+  return dist < bestDist || (dist === bestDist && id < bestId)
+}
+
 /** How much noise a fox is making right now, as a multiplier on how far it
  * can be heard. Sprinting gives it away; standing over a carcass doesn't. */
 function foxNoiseFactor(fox) {
@@ -675,20 +754,26 @@ function foxNoiseFactor(fox) {
 function findNearestDetectedFox(sim, rabbit, stats) {
   let best = null
   let bestDist = Infinity
+  let bestId = Infinity
   let bestHeard = false
-  for (const fox of sim.foxes) {
-    if (!fox.alive) continue
+  // The furthest off any fox could be and still register. Camouflage only
+  // ever shrinks the sight range (stealthFactor <= 1) and noise only ever
+  // scales the hearing one, so nothing detectable lies outside this box.
+  const reach = Math.max(PREY_ALERT_RADIUS, stats.hearingRadius * FOX_NOISE_MAX)
+  forEachWithin(sim.foxGrid, rabbit.x, rabbit.y, reach, (fox) => {
+    if (!fox.alive) return
     const dx = fox.x - rabbit.x
     const dy = fox.y - rabbit.y
     const dist = Math.hypot(dx, dy)
-    if (dist >= bestDist) continue
+    if (!beats(dist, fox.id, bestDist, bestId)) return
     const seen = dist <= PREY_ALERT_RADIUS * foxStats(fox.genes).stealthFactor
     const heard = dist <= stats.hearingRadius * foxNoiseFactor(fox)
-    if (!seen && !heard) continue
+    if (!seen && !heard) return
     bestDist = dist
+    bestId = fox.id
     best = fox
     bestHeard = !seen
-  }
+  })
   return best ? { fox: best, x: best.x, y: best.y, dist: bestDist, heardOnly: bestHeard } : null
 }
 
@@ -701,28 +786,44 @@ function findNearestDetectedFox(sim, rabbit, stats) {
  */
 function hearCalls(sim, rabbit, stats) {
   let strength = 0
+  // -1 rather than Infinity, and the reason is the zero above it: a call of
+  // exactly zero loudness (a caller sitting on the very edge of reach) never
+  // registered under the old strictly-greater test, so nothing may tie with
+  // "heard nothing". Once a real call is in, ties go to the lower id.
+  let strengthId = -1
   let dangerX = null
   let dangerY = null
   let burrowX = null
   let burrowY = null
   let burrowDist = Infinity
-  for (const other of sim.rabbits) {
-    if (other === rabbit || !other.alive) continue
+  let burrowId = Infinity
+  // This was the pass that made the whole simulation quadratic: every rabbit
+  // against every other rabbit, five times a second (issue #21). The reach
+  // of any one call depends on both ends - a loud caller and sharp ears - so
+  // the box is sized on the loudest voice the gene pool allows against
+  // *this* rabbit's ears, and the exact per-pair test still runs inside it.
+  forEachWithin(sim.rabbitGrid, rabbit.x, rabbit.y, maxAlarmReach(stats), (other) => {
+    if (other === rabbit || !other.alive) return
     const dist = Math.hypot(other.x - rabbit.x, other.y - rabbit.y)
     const reach = alarmReach(other.senses, stats)
-    if (dist > reach) continue
+    if (dist > reach) return
     const loudness = 1 - dist / reach
-    if (other.alarmUntil > sim.clock && loudness > strength) {
+    if (
+      other.alarmUntil > sim.clock &&
+      (loudness > strength || (loudness === strength && other.id < strengthId))
+    ) {
       strength = loudness
+      strengthId = other.id
       dangerX = other.alarmX
       dangerY = other.alarmY
     }
-    if (other.burrowCallUntil > sim.clock && dist < burrowDist) {
+    if (other.burrowCallUntil > sim.clock && beats(dist, other.id, burrowDist, burrowId)) {
       burrowDist = dist
+      burrowId = other.id
       burrowX = other.burrowCallX
       burrowY = other.burrowCallY
     }
-  }
+  })
   return { strength, dangerX, dangerY, burrowX, burrowY }
 }
 
@@ -745,13 +846,15 @@ function knownBurrow(sim, rabbit, calls) {
 function findNearestPrey(sim, fox, visionRadius) {
   let best = null
   let bestDist = Infinity
-  for (const rabbit of sim.rabbits) {
-    if (!rabbit.alive || rabbit.burrowId != null) continue
+  let bestId = Infinity
+  forEachWithin(sim.rabbitGrid, fox.x, fox.y, visionRadius, (rabbit) => {
+    if (!rabbit.alive || rabbit.burrowId != null) return
     const dist = Math.hypot(rabbit.x - fox.x, rabbit.y - fox.y)
-    if (dist > visionRadius || dist >= bestDist) continue
+    if (dist > visionRadius || !beats(dist, rabbit.id, bestDist, bestId)) return
     bestDist = dist
+    bestId = rabbit.id
     best = rabbit
-  }
+  })
   return best ? { rabbit: best, dist: bestDist } : null
 }
 
@@ -762,7 +865,7 @@ function findNearestPrey(sim, fox, visionRadius) {
  * that panics at every shadow is easier to track than one that holds its
  * nerve, which is a cost `skittishness` never used to pay. */
 function rabbitScentFactor(map, rabbit) {
-  let factor = rabbit.running ? 1.3 : rabbit.resting ? 0.55 : 1
+  let factor = rabbit.running ? SCENT_RUNNING : rabbit.resting ? SCENT_RESTING : 1
   // Undergrowth masks a scent the way a canopy masks a sightline. Woodland
   // already costs a fox 45% of its vision (FOREST_VISION_FACTOR); without
   // the same discount on its nose, the trees stopped being a refuge the
@@ -792,17 +895,19 @@ function rabbitScentFactor(map, rabbit) {
 function senseScent(sim, fox, radius) {
   let best = null
   let bestDist = Infinity
+  let bestId = Infinity
   let bestReach = 0
-  for (const rabbit of sim.rabbits) {
-    if (!rabbit.alive || rabbit.burrowId != null) continue
+  forEachWithin(sim.rabbitGrid, fox.x, fox.y, radius * SCENT_MAX, (rabbit) => {
+    if (!rabbit.alive || rabbit.burrowId != null) return
     const dist = Math.hypot(rabbit.x - fox.x, rabbit.y - fox.y)
-    if (dist >= bestDist) continue
+    if (!beats(dist, rabbit.id, bestDist, bestId)) return
     const reach = radius * rabbitScentFactor(sim.map, rabbit)
-    if (dist > reach) continue
+    if (dist > reach) return
     bestDist = dist
+    bestId = rabbit.id
     bestReach = reach
     best = rabbit
-  }
+  })
   if (!best) return null
   const trueBearing = Math.atan2(best.y - fox.y, best.x - fox.x)
   const vagueness = (bestDist / bestReach) * SCENT_JITTER
@@ -827,35 +932,45 @@ function senseScent(sim, fox, radius) {
  * and starves them just as effectively.
  */
 function findNearestShorePrey(sim, fox, radius, canSwim) {
-  let best = null
-  let bestKind = null
-  let bestDist = Infinity
   const reachable = (x, y) => canSwim || !isWaterTile(sim.map, x, y) || isBankside(sim.map, x, y)
-  for (const [kind, list] of [['crab', sim.crabs], ['fish', sim.fish]]) {
-    for (const c of list) {
-      if (!c.alive) continue
+  const nearest = (grid) => {
+    let best = null
+    let bestDist = Infinity
+    let bestId = Infinity
+    forEachWithin(grid, fox.x, fox.y, radius, (c) => {
+      if (!c.alive) return
       const dist = Math.hypot(c.x - fox.x, c.y - fox.y)
-      if (dist > radius || dist >= bestDist) continue
-      if (!reachable(c.x, c.y)) continue
+      if (dist > radius || !beats(dist, c.id, bestDist, bestId)) return
+      if (!reachable(c.x, c.y)) return
       bestDist = dist
+      bestId = c.id
       best = c
-      bestKind = kind
-    }
+    })
+    return best ? { creature: best, dist: bestDist } : null
   }
-  return best ? { creature: best, kind: bestKind, dist: bestDist } : null
+  // A crab and a fish exactly the same distance off go to the crab, which is
+  // what walking sim.crabs before sim.fish used to do on its own and is the
+  // right answer anyway: given the choice of two equally close meals a fox
+  // takes the one that is easier to catch.
+  const crab = nearest(sim.crabGrid)
+  const fish = nearest(sim.fishGrid)
+  if (fish && (!crab || fish.dist < crab.dist)) return { creature: fish.creature, kind: 'fish', dist: fish.dist }
+  return crab ? { creature: crab.creature, kind: 'crab', dist: crab.dist } : null
 }
 
 /** The nearest other live fox within `radius`, for pack behaviour. */
 function findNearestPackmate(sim, fox, radius) {
   let best = null
   let bestDist = Infinity
-  for (const other of sim.foxes) {
-    if (other === fox || !other.alive) continue
+  let bestId = Infinity
+  forEachWithin(sim.foxGrid, fox.x, fox.y, radius, (other) => {
+    if (other === fox || !other.alive) return
     const dist = Math.hypot(other.x - fox.x, other.y - fox.y)
-    if (dist > radius || dist >= bestDist) continue
+    if (dist > radius || !beats(dist, other.id, bestDist, bestId)) return
     bestDist = dist
+    bestId = other.id
     best = other
-  }
+  })
   return best ? { fox: best, dist: bestDist } : null
 }
 
@@ -882,8 +997,7 @@ function attemptStep(sim, rabbit, dirX, dirY, durationMs) {
   const nx = rabbit.x + dirX
   const ny = rabbit.y + dirY
   if (!canRabbitEnter(sim, rabbit, nx, ny)) return false
-  rabbit.x = nx
-  rabbit.y = ny
+  moveCreature(sim, rabbit, nx, ny)
   // The tile moved; the *sprite* starts travelling there over the same
   // duration the next step is due in, so it arrives just as it is asked to
   // leave again (see ./motion.js).
@@ -1006,7 +1120,7 @@ function callBurrow(sim, rabbit, burrow) {
 }
 
 function foxNearTile(sim, x, y, radius) {
-  return sim.foxes.some((f) => f.alive && Math.hypot(f.x - x, f.y - y) <= radius)
+  return someWithin(sim.foxGrid, x, y, radius, (f) => f.alive && Math.hypot(f.x - x, f.y - y) <= radius)
 }
 
 /**
@@ -1083,8 +1197,7 @@ function runShelteredTick(sim, rabbit, burrow, out, threat) {
       enterBurrow(escape, rabbit)
       // It came up somewhere else entirely: snap the sprite to the new mouth
       // rather than gliding it across the ground it actually tunnelled under.
-      rabbit.x = escape.x
-      rabbit.y = escape.y
+      moveCreature(sim, rabbit, escape.x, escape.y)
       teleportMotion(rabbit, escape.x, escape.y)
       rabbit.shelterTicks = 0
       return
@@ -1376,8 +1489,7 @@ function tryFoxStep(sim, fox, dirX, dirY, stats, durationMs) {
   // and a fox that cannot cross a channel is one an island's warren never
   // meets.
   if (!canEnterTile(sim.map, nx, ny, stats, isWaterTile(sim.map, fox.x, fox.y))) return false
-  fox.x = nx
-  fox.y = ny
+  moveCreature(sim, fox, nx, ny)
   beginMove(fox, nx, ny, durationMs, isWaterTile(sim.map, nx, ny) ? SWIM : HOP)
   return true
 }
@@ -1417,22 +1529,28 @@ function moveFox(sim, fox, moveX, moveY, tilesPerTick, stats) {
 /** The pounce: any rabbit within POUNCE_RANGE of a hunting fox is taken. */
 function tryPounce(sim, fox, stats) {
   if (!fox.hunting) return
-  for (const rabbit of sim.rabbits) {
+  // A square of reach rather than a circle, which is what the grid's own
+  // search box already is - so at POUNCE_RANGE this visits exactly the
+  // buckets the pounce can touch and nothing else.
+  let target = null
+  forEachWithin(sim.rabbitGrid, fox.x, fox.y, POUNCE_RANGE, (rabbit) => {
     // Underground is out of reach: a fox can stand on the entrance all it
     // likes (and that does keep the rabbit down there, starving), but it
     // cannot dig one out.
-    if (!rabbit.alive || rabbit.burrowId != null) continue
-    if (Math.abs(rabbit.x - fox.x) > POUNCE_RANGE || Math.abs(rabbit.y - fox.y) > POUNCE_RANGE) continue
-    rabbit.alive = false
-    rabbit.energy = 0
-    fox.energy = Math.min(FOX_ENERGY_MAX, fox.energy + stats.energyPerKill)
-    fox.kills += 1
-    sim.kills += 1
-    fox.feedingRemaining = FOX_FEED_MS
-    fox.hunting = false
-    fox.sprinting = false
-    return
-  }
+    if (!rabbit.alive || rabbit.burrowId != null) return
+    if (target && rabbit.id > target.id) return
+    if (Math.abs(rabbit.x - fox.x) > POUNCE_RANGE || Math.abs(rabbit.y - fox.y) > POUNCE_RANGE) return
+    target = rabbit
+  })
+  if (!target) return
+  target.alive = false
+  target.energy = 0
+  fox.energy = Math.min(FOX_ENERGY_MAX, fox.energy + stats.energyPerKill)
+  fox.kills += 1
+  sim.kills += 1
+  fox.feedingRemaining = FOX_FEED_MS
+  fox.hunting = false
+  fox.sprinting = false
 }
 
 /**
@@ -1451,14 +1569,26 @@ function tryPounce(sim, fox, stats) {
 function tryCatchShorePrey(sim, fox, stats) {
   if (!fox.foraging) return
   const inReach = (c) => Math.abs(c.x - fox.x) <= POUNCE_RANGE && Math.abs(c.y - fox.y) <= POUNCE_RANGE
-  for (const crab of sim.crabs) {
-    if (!crab.alive || !inReach(crab)) continue
+  // Gathered and put back into spawn order before a single die is rolled.
+  // Unlike every other scan here, the *order* of these attempts is itself
+  // part of the run: each one consumes a random number whether it lands or
+  // not, so a grid that offered the same two crabs in the other order would
+  // hand the whole seeded run a different future (see the determinism note
+  // in scripts/ecosystem.mjs). The list is a paw's reach long, so sorting it
+  // costs nothing.
+  const within = (grid) => {
+    const found = []
+    forEachWithin(grid, fox.x, fox.y, POUNCE_RANGE, (c) => {
+      if (c.alive && inReach(c)) found.push(c)
+    })
+    return found.sort((a, b) => a.id - b.id)
+  }
+  for (const crab of within(sim.crabGrid)) {
     if (Math.random() >= CRAB_CATCH_CHANCE * (1 - crab.stats.toughness)) continue
     takeShorePrey(sim, fox, crab, stats.energyPerKill * CRAB_MEAL_SHARE)
     return
   }
-  for (const fish of sim.fish) {
-    if (!fish.alive || !inReach(fish)) continue
+  for (const fish of within(sim.fishGrid)) {
     const base = fox.swimming ? FISH_CATCH_CHANCE.swimming : FISH_CATCH_CHANCE.bank
     if (Math.random() >= base * (1 - fish.stats.evasion)) continue
     takeShorePrey(sim, fox, fish, stats.energyPerKill * FISH_MEAL_SHARE)
@@ -1479,7 +1609,13 @@ function takeShorePrey(sim, fox, prey, gain) {
 /** True when another live fox is close enough that this one will not den
  * here (see FOX_TERRITORY_RADIUS). */
 function territoryTaken(sim, fox) {
-  return sim.foxes.some((other) => other !== fox && other.alive && Math.hypot(other.x - fox.x, other.y - fox.y) <= FOX_TERRITORY_RADIUS)
+  return someWithin(
+    sim.foxGrid,
+    fox.x,
+    fox.y,
+    FOX_TERRITORY_RADIUS,
+    (other) => other !== fox && other.alive && Math.hypot(other.x - fox.x, other.y - fox.y) <= FOX_TERRITORY_RADIUS,
+  )
 }
 
 function tryFoxReproduce(sim, fox, stats, wants) {
@@ -1743,32 +1879,45 @@ function stepFox(sim, fox, dtMs) {
 function nearestFoxWithin(sim, x, y, radius) {
   let best = null
   let bestDist = Infinity
-  for (const fox of sim.foxes) {
-    if (!fox.alive) continue
+  let bestId = Infinity
+  forEachWithin(sim.foxGrid, x, y, radius, (fox) => {
+    if (!fox.alive) return
     const dist = Math.hypot(fox.x - x, fox.y - y)
-    if (dist > radius || dist >= bestDist) continue
+    if (dist > radius || !beats(dist, fox.id, bestDist, bestId)) return
     bestDist = dist
+    bestId = fox.id
     best = fox
-  }
+  })
   return best ? { fox: best, dist: bestDist } : null
 }
 
 /**
- * *A* live fish within `radius` - the first one found, not the nearest.
+ * *A* live fish within `radius` - not the nearest.
  *
  * A shoal is not a formation, it is a habit of not being alone, so "hold
- * station with whichever neighbour I noticed" is both the honest model and
- * the cheap one: it lets the scan stop at the first hit instead of walking
- * every fish in the world, which is the difference between a lake of two
- * hundred fish costing linear work per tick and quadratic.
+ * station with whichever neighbour I noticed" is the honest model as well as
+ * the cheap one: which fish in range it picks does not matter, only that it
+ * has one.
+ *
+ * It still has to pick the *same* one it always did, though, or a seeded run
+ * stops reproducing - so "whichever the array scan reached first" becomes
+ * "the earliest-spawned in range", which is the same fish (see beats above).
+ * The old scan stopped at its first hit and was cheap when the lake was
+ * crowded; it was a walk of every fish in the world when it wasn't, which is
+ * exactly backwards - an isolated fish is the one that can least afford it.
  */
 function anyShoalmate(sim, fish, radius) {
-  for (const other of sim.fish) {
-    if (other === fish || !other.alive) continue
+  let best = null
+  let bestDist = 0
+  forEachWithin(sim.fishGrid, fish.x, fish.y, radius, (other) => {
+    if (other === fish || !other.alive) return
+    if (best && other.id > best.id) return
     const dist = Math.hypot(other.x - fish.x, other.y - fish.y)
-    if (dist <= radius) return { fish: other, dist }
-  }
-  return null
+    if (dist > radius) return
+    best = other
+    bestDist = dist
+  })
+  return best ? { fish: best, dist: bestDist } : null
 }
 
 /** The nearest tile within `radius` that is bearing forage *and* that this
@@ -1856,8 +2005,7 @@ function tryAquaticStep(sim, entity, dirX, dirY, canEnter, durationMs) {
   const nx = entity.x + dirX
   const ny = entity.y + dirY
   if (!canEnter(nx, ny)) return false
-  entity.x = nx
-  entity.y = ny
+  moveCreature(sim, entity, nx, ny)
   entity.swimming = isWaterTile(sim.map, nx, ny)
   beginMove(entity, nx, ny, durationMs, entity.swimming ? SWIM : HOP)
   return true
@@ -2232,10 +2380,24 @@ export function stepSimulation(sim, dtMs) {
       if (!r.alive && r.burrowId != null) leaveBurrow(sim.burrows, r)
     }
     sim.rabbits = sim.rabbits.filter((r) => r.alive)
+    gridRebuild(sim.rabbitGrid, sim.rabbits)
   }
-  if (sim.foxes.some((f) => !f.alive)) sim.foxes = sim.foxes.filter((f) => f.alive)
-  if (sim.fish.some((f) => !f.alive)) sim.fish = sim.fish.filter((f) => f.alive)
-  if (sim.crabs.some((c) => !c.alive)) sim.crabs = sim.crabs.filter((c) => c.alive)
+  // The dead stay in the grid until here, which is fine and deliberate: every
+  // query below checks `alive` anyway, so a creature caught mid-tick is
+  // already invisible to the rest of the tick. Rebuilding is a walk of the
+  // survivors, the same O(n) the filter above just spent.
+  if (sim.foxes.some((f) => !f.alive)) {
+    sim.foxes = sim.foxes.filter((f) => f.alive)
+    gridRebuild(sim.foxGrid, sim.foxes)
+  }
+  if (sim.fish.some((f) => !f.alive)) {
+    sim.fish = sim.fish.filter((f) => f.alive)
+    gridRebuild(sim.fishGrid, sim.fish)
+  }
+  if (sim.crabs.some((c) => !c.alive)) {
+    sim.crabs = sim.crabs.filter((c) => c.alive)
+    gridRebuild(sim.crabGrid, sim.crabs)
+  }
   const selectedList = creaturesOfKind(sim, sim.selectedKind)
   if (sim.selectedId != null && !selectedList.some((c) => c.id === sim.selectedId)) selectCreature(sim, null, null)
   regrowPatches(sim.clock, sim.regrowQueue, sim.hasApple, sim.regrowAt)
