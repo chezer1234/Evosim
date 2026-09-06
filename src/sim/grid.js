@@ -17,7 +17,9 @@
 // tile at a time, so a step is at worst a pop from one bucket and a push to
 // another.
 //
-// Two rules make it safe to rely on:
+// Three rules make it safe to rely on, and all three fail the same quiet
+// way: not with an exception, but with a fox that cannot see a rabbit
+// standing next to it.
 //
 //   - Every write to a creature's x/y must be followed by gridMoved(), or
 //     the index silently disagrees with the world. In the simulation that is
@@ -27,6 +29,20 @@
 //     from the grid it is walking. Marking a creature dead is fine - the
 //     queries all check `alive` and the dead are swept out at the end of the
 //     tick - but a spawn or a step during a visit is not.
+//   - The radius handed to a query must be an upper bound on what that query
+//     can actually reach. Half the senses here have a range that depends on
+//     the candidate as much as the searcher, so their bound is *derived* -
+//     the loudest voice the gene pool allows, the strongest a rabbit can
+//     smell - and a derived bound is a promise about the range of its
+//     inputs. Bounds over a gene are safe on their own: genes are clamped to
+//     0..1 at birth and at every mutation, so HEARING_TILES[1] and its
+//     kind are ceilings nothing can lift. A bound over a plain *constant* is
+//     only safe while it stays constant. If a distance ever becomes
+//     configurable - a per-run rule, a difficulty setting, a slider - every
+//     query that searched on the old value has to search on the new one too,
+//     or it quietly stops reaching the far half of the range. Distances are
+//     the only dial with this problem; an energy, a duration or a
+//     probability cannot shrink a search box.
 //
 // Buckets are unordered (removal swaps the last entry into the hole), so
 // callers that used to depend on array order - "the first rabbit in range",
@@ -35,8 +51,9 @@
 // order-preserving, so lowest-id *is* first-in-array-order, and the queries
 // come out identical rather than merely equivalent.
 
-// Tiles per bucket. The sim's search radii run from 1 tile (a pounce) to 24
-// (a fox's territory), so no single size is ideal for all of them; 8 keeps
+// Tiles per bucket. The sim's search radii run from 1 tile (a pounce) to a
+// couple of dozen (a fox's territory), so no single size is ideal for all of
+// them; 8 keeps
 // the common senses - 6 to 14 tiles - down to a handful of buckets without
 // making the pounce scan a quarter of the island.
 const CELL = 8
