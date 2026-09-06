@@ -35,6 +35,9 @@ import { FOREST_SCENT_FACTOR, FOREST_VISION_FACTOR, FOX_ENERGY_MAX, FOX_GENE_KEY
 import { RABBIT_GENE_KEYS, alarmReach, createRabbitGenes, mutateRabbitGenes, rabbitStats } from './rabbit.js'
 import { FISH_ENERGY_MAX, FISH_GENE_KEYS, createFishGenes, fishStats, mutateFishGenes } from './fish.js'
 import { CRAB_ENERGY_MAX, CRAB_GENE_KEYS, crabStats, createCrabGenes, mutateCrabGenes } from './crab.js'
+// The player's starting conditions, resolved into the rules this run plays
+// by (see ./scenario.js). Everything tunable is reached through sim.rules.
+import { createRules, resolveScenario } from './scenario.js'
 import {
   FORAGE_REGROW_MS,
   forageTiles,
@@ -80,7 +83,6 @@ const ENERGY_DEPLETE_RUN_MS = 1000 // -1 energy every 1s while running
 // being caught. A burrow costs you your foraging time; it should not also
 // cost you the same energy as foraging.
 const ENERGY_DEPLETE_SHELTERED_MS = 5500
-const EAT_GAIN = 10
 // With no apple in vision, the brain only ever sees a constant food signal
 // (dx=0, dy=0, dist=1) plus one noisy input, so its evolved move outputs
 // tend to collapse into one of two failure modes: a fixed bearing (whatever
@@ -108,7 +110,6 @@ const SEARCH_HEADING_TICKS = 9 // ~1.8s per heading at TICK_MS=200
 // a countdown that quietly ran out while it was still deciding whether to
 // bother.
 const HUNGRY_ENERGY = 65
-const REPRO_ENERGY_THRESHOLD = 75
 const REPRO_COST = 10
 // Not specified by the issue, but a child can't start at full energy for
 // free: the parent only pays REPRO_COST (10). Raised from 50 -> 80 because
@@ -118,7 +119,6 @@ const REPRO_COST = 10
 // generation. 80 gives a child real headroom to find food while still
 // costing the parent net energy (parent -10, child +80).
 const CHILD_START_ENERGY = 80
-const GESTATION_MS = 30000
 const REGROW_MS = 45000 // how long an eaten tree takes to bear a new apple
 const TRAIT_SAMPLE_MS = 5000 // how often to snapshot population-wide traits
 const TRAIT_HISTORY_LIMIT = 240 // ~20 minutes of samples at TRAIT_SAMPLE_MS
@@ -178,15 +178,19 @@ const FOX_PACK_KEEP_DISTANCE = 2.5 // don't crowd a packmate once alongside it
 // breed. Widened from 18 when the swim gene landed (#17): a shoreline a
 // non-swimming rabbit cannot cross is a wall it can be pinned against, so
 // the same fox density catches far more than it used to.
-const FOX_TERRITORY_RADIUS = 24
+// The radius in force is sim.rules.fox.territoryRadius, which a scenario can
+// widen, narrow, or set to zero to switch the rule off (see ./scenario.js).
+// Same for every number below that a player can reach.
+
 // How long after a litter before a fox will carry another. Gestation itself
-// is short now (30-58s, deliberately - see GESTATION_MS in fox.js), and
+// is short now (30-58s, deliberately - see FOX_BASE.gestationMs in fox.js), and
 // without a recovery period a well-fed fox simply converts every second
 // kill into another fox: a rabbit boom becomes a fox boom within a couple
 // of minutes, and the foxes then strip the island. This is the *rate* limit
 // that lets the prey population recover between litters, where the
 // territory rule above is the *density* limit.
-const FOX_LITTER_RECOVERY_MS = 150000
+// The wait in force is sim.rules.fox.litterRecoveryMs.
+
 // How loud a fox is to a rabbit's ears. Hearing is the sense camouflage
 // can't beat (issue #14) - but it can be beaten by *moving quietly*, which
 // is what keeps a stalking fox viable: a sprint through the undergrowth
@@ -337,8 +341,14 @@ export function isPlaceableFor(map, species, x, y) {
 
 /** Fresh simulation state for a given map. Apple-current-state starts from
  * the map's fixed canHaveApple flags (every eligible tree starts bearing
- * fruit), and the shallows are laid out the same way - see ./shallows.js. */
-export function createSimulation(map) {
+ * fruit), and the shallows are laid out the same way - see ./shallows.js.
+ *
+ * `scenario` is the player's starting-conditions dial set (see
+ * ./scenario.js), resolved once into `sim.rules` and then fixed: every
+ * founder built, every cub mutated and every apple eaten in this run reads
+ * those rules and never a module constant, so a run cannot change its own
+ * physics halfway through. Omitted, it is today's balance. */
+export function createSimulation(map, scenario = {}) {
   // Both derived from the map and never changed afterwards: how far each tile
   // is from water (what a crab's boldness is measured in) and which tiles can
   // grow algae or wrack at all.
@@ -349,6 +359,10 @@ export function createSimulation(map) {
   const cap = (per, [lo, hi]) => Math.min(hi, Math.max(lo, Math.round(forageCount * per)))
   return {
     map,
+    // The rules of this run, and the dial set they were derived from (the
+    // latter only so the UI can say which preset is playing).
+    rules: createRules(scenario),
+    scenario: resolveScenario(scenario),
     rabbits: [],
     foxes: [],
     // The shoreline species. Kept as their own lists rather than one
@@ -418,7 +432,7 @@ export function selectCreature(sim, kind, id) {
 }
 
 export function spawnRabbit(sim, x, y, brain, startEnergy = ENERGY_START, generation = 0, genes = null) {
-  const senseGenes = genes || createRabbitGenes(Math.random)
+  const senseGenes = genes || createRabbitGenes(Math.random, sim.rules.rabbit)
   const rabbit = {
     id: nextRabbitId++,
     x,
@@ -435,7 +449,7 @@ export function spawnRabbit(sim, x, y, brain, startEnergy = ENERGY_START, genera
     gestating: false,
     gestationRemaining: 0,
     generation,
-    brain: brain || createBrain(Math.random),
+    brain: brain || createBrain(Math.random, sim.rules.rabbit),
     // The sense half of the genome: how far it hears and how far its own
     // alarm call carries (see ./rabbit.js). Separate from the brain because
     // ears are hardware, not an opinion the net can hold.
@@ -502,10 +516,10 @@ export function spawnFox(sim, x, y, genes, startEnergy = FOX_START_ENERGY, gener
     y,
     energy: startEnergy,
     alive: true,
-    genes: genes || createFoxGenes(Math.random),
+    genes: genes || createFoxGenes(Math.random, sim.rules.fox),
     // The decision half of the genome: when to chase, sprint, track a
     // scent, join the pack, lie up and breed.
-    brain: brain || createFoxBrain(Math.random),
+    brain: brain || createFoxBrain(Math.random, sim.rules.fox),
     tickAccum: 0,
     // Fractional tiles-per-tick budget: a whole tile is stepped each time
     // this crosses 1, which is what lets the speed gene be continuous
@@ -528,7 +542,7 @@ export function spawnFox(sim, x, y, genes, startEnergy = FOX_START_ENERGY, gener
     gestating: false,
     gestationRemaining: 0,
     // Cubs of its own are off the table until this clock time (see
-    // FOX_LITTER_RECOVERY_MS). Cubs are born already on the clock, so a
+    // sim.rules.fox.litterRecoveryMs). Cubs are born already on the clock, so a
     // litter cannot immediately have litters of its own.
     nextLitterAt: 0,
     generation,
@@ -548,9 +562,9 @@ export function spawnFox(sim, x, y, genes, startEnergy = FOX_START_ENERGY, gener
     drowned: false,
   }
   fox.swimming = isWaterTile(sim.map, x, y)
-  fox.floundering = fox.swimming && !foxStats(fox.genes).canSwim
+  fox.floundering = fox.swimming && !foxStats(fox.genes, sim.rules.fox).canSwim
   attachMotion(fox, fox.heading)
-  fox.sprintBudget = foxStats(fox.genes).maxSprintTicks
+  fox.sprintBudget = foxStats(fox.genes, sim.rules.fox).maxSprintTicks
   sim.foxes.push(fox)
   return fox
 }
@@ -682,7 +696,7 @@ function findNearestDetectedFox(sim, rabbit, stats) {
     const dy = fox.y - rabbit.y
     const dist = Math.hypot(dx, dy)
     if (dist >= bestDist) continue
-    const seen = dist <= PREY_ALERT_RADIUS * foxStats(fox.genes).stealthFactor
+    const seen = dist <= PREY_ALERT_RADIUS * foxStats(fox.genes, sim.rules.fox).stealthFactor
     const heard = dist <= stats.hearingRadius * foxNoiseFactor(fox)
     if (!seen && !heard) continue
     bestDist = dist
@@ -931,15 +945,15 @@ function tryEat(sim, rabbit) {
     hasApple[idx] = 0
     regrowAt[idx] = sim.clock + REGROW_MS
     sim.regrowQueue.push(idx)
-    rabbit.energy = Math.min(ENERGY_MAX, rabbit.energy + EAT_GAIN)
+    rabbit.energy = Math.min(ENERGY_MAX, rabbit.energy + sim.rules.rabbit.eatGain)
   }
 }
 
 function tryReproduce(sim, rabbit, desireHigh) {
-  if (rabbit.gestating || !desireHigh || rabbit.energy <= REPRO_ENERGY_THRESHOLD) return
+  if (rabbit.gestating || !desireHigh || rabbit.energy <= sim.rules.rabbit.breedEnergy) return
   rabbit.energy -= REPRO_COST
   rabbit.gestating = true
-  rabbit.gestationRemaining = GESTATION_MS
+  rabbit.gestationRemaining = sim.rules.rabbit.gestationMs
 }
 
 // Hold a random heading for SEARCH_HEADING_TICKS decision ticks, then pick a
@@ -981,8 +995,8 @@ function birthTileNear(map, x, y) {
 
 function finishGestation(sim, rabbit) {
   rabbit.gestating = false
-  const childBrain = mutateBrain(rabbit.brain, Math.random)
-  const childGenes = mutateRabbitGenes(rabbit.genes, Math.random)
+  const childBrain = mutateBrain(rabbit.brain, Math.random, sim.rules.brain)
+  const childGenes = mutateRabbitGenes(rabbit.genes, Math.random, sim.rules.rabbit)
   const childGen = rabbit.generation + 1
   const [nx, ny] = birthTileNear(sim.map, rabbit.x, rabbit.y)
   spawnRabbit(sim, nx, ny, childBrain, CHILD_START_ENERGY, childGen, childGenes)
@@ -1477,9 +1491,9 @@ function takeShorePrey(sim, fox, prey, gain) {
 }
 
 /** True when another live fox is close enough that this one will not den
- * here (see FOX_TERRITORY_RADIUS). */
+ * here (see sim.rules.fox.territoryRadius). */
 function territoryTaken(sim, fox) {
-  return sim.foxes.some((other) => other !== fox && other.alive && Math.hypot(other.x - fox.x, other.y - fox.y) <= FOX_TERRITORY_RADIUS)
+  return sim.foxes.some((other) => other !== fox && other.alive && Math.hypot(other.x - fox.x, other.y - fox.y) <= sim.rules.fox.territoryRadius)
 }
 
 function tryFoxReproduce(sim, fox, stats, wants) {
@@ -1493,13 +1507,13 @@ function tryFoxReproduce(sim, fox, stats, wants) {
 
 function finishFoxGestation(sim, fox) {
   fox.gestating = false
-  fox.nextLitterAt = sim.clock + FOX_LITTER_RECOVERY_MS
-  const cubGenes = mutateFoxGenes(fox.genes, Math.random)
-  const cubBrain = mutateFoxBrain(fox.brain, Math.random)
+  fox.nextLitterAt = sim.clock + sim.rules.fox.litterRecoveryMs
+  const cubGenes = mutateFoxGenes(fox.genes, Math.random, sim.rules.fox)
+  const cubBrain = mutateFoxBrain(fox.brain, Math.random, sim.rules.brain)
   const cubGen = fox.generation + 1
   const [nx, ny] = birthTileNear(sim.map, fox.x, fox.y)
   const cub = spawnFox(sim, nx, ny, cubGenes, FOX_CUB_ENERGY, cubGen, cubBrain)
-  cub.nextLitterAt = sim.clock + FOX_LITTER_RECOVERY_MS
+  cub.nextLitterAt = sim.clock + sim.rules.fox.litterRecoveryMs
 }
 
 /**
@@ -1537,7 +1551,7 @@ function buildFoxInputs(fox, stats, prey, scent, packmate, visionRadius, inFores
 }
 
 function runFoxDecisionTick(sim, fox) {
-  const stats = foxStats(fox.genes)
+  const stats = foxStats(fox.genes, sim.rules.fox)
 
   // Out of its depth, same rule as the rabbits: swim for the bank or drown
   // trying. A fox in this state is not hunting anything.
@@ -1691,7 +1705,7 @@ function runFoxDecisionTick(sim, fox) {
 }
 
 function stepFox(sim, fox, dtMs) {
-  const stats = foxStats(fox.genes)
+  const stats = foxStats(fox.genes, sim.rules.fox)
   // Continuous drain rather than the rabbits' whole-number ticks: a fox's
   // burn rate is a gene, so it needs the resolution. A fox lying up burns a
   // fraction of it - the payoff for a decision its brain made and could just

@@ -1,6 +1,6 @@
 import ContourBackdrop from './ContourBackdrop.jsx'
 
-export default function HomeScreen({ onPlay, onOpenSettings }) {
+export default function HomeScreen({ onPlay, onOpenSettings, onOpenScenario }) {
   // min-h-svh + py so the whole thing still fits (and scrolls if it must) on
   // a phone held sideways, where the viewport is only ~350px tall.
   return (
@@ -27,6 +27,15 @@ export default function HomeScreen({ onPlay, onOpenSettings }) {
             className="min-h-12 rounded-sm border border-neutral-700 bg-neutral-900 px-8 py-3 font-semibold text-neutral-100 transition hover:border-emerald-500 hover:text-emerald-400 active:translate-y-px"
           >
             Settings
+          </button>
+          {/* The world you play in, and the population you play it with, are
+              two decisions - so they are two doors off the front page. */}
+          <button
+            type="button"
+            onClick={onOpenScenario}
+            className="min-h-12 rounded-sm border border-neutral-700 bg-neutral-900 px-8 py-3 font-semibold text-neutral-100 transition hover:border-amber-500 hover:text-amber-400 active:translate-y-px"
+          >
+            Scenario
           </button>
         </div>
       </div>

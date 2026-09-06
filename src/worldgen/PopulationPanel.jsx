@@ -175,7 +175,7 @@ function ShorelineChart({ history, onExpandChart }) {
 /** `mapInfo` carries the map's size/lakes/seed - shown here only when the
  * caller has nowhere else to put them, which on a compact screen is the case:
  * the phone toolbar has room for the live counts and nothing more. */
-export default function PopulationPanel({ population, foxPopulation, fishPopulation = 0, crabPopulation = 0, kills, shoreCatches = 0, burrows, sheltered, swimmers, seafarers = 0, islands = 1, colonised = 0, atSea = 0, islandRows = [], drownings, history, generationRange, foxGenerationRange, mapInfo, onClose, onExpandChart }) {
+export default function PopulationPanel({ population, foxPopulation, fishPopulation = 0, crabPopulation = 0, kills, shoreCatches = 0, burrows, sheltered, swimmers, seafarers = 0, islands = 1, colonised = 0, atSea = 0, islandRows = [], drownings, history, generationRange, foxGenerationRange, mapInfo, scenarioLabel = null, onClose, onExpandChart }) {
   const latest = history[history.length - 1]
   const hasFoxTrend = history.some((s) => s.foxGenes)
   const hasFoxInstinctTrend = history.some((s) => s.foxTraits)
@@ -200,6 +200,11 @@ export default function PopulationPanel({ population, foxPopulation, fishPopulat
         {kills ? ` · ${kills} caught` : ''}
         {shoreCatches ? ` · ${shoreCatches} off the shore` : ''}
       </p>
+      {/* Which world this is, when it isn't the default one: a run started
+          from a preset (or a hand-tuned scenario) behaves differently enough
+          that "why are there so many rabbits" deserves an answer in the
+          panel rather than in the player's memory. See sim/scenario.js. */}
+      {scenarioLabel ? <p className="text-[11px] text-amber-400/90">🧬 {scenarioLabel} starting conditions</p> : null}
       {/* The second food chain, and the reason a fox population can outlive
           the rabbits entirely (see sim/shallows.js). Hidden until there is
           something in the water, since an island with a dry shoreline has

@@ -1,14 +1,6 @@
 import Slider from './Slider.jsx'
+import Group from './SettingsGroup.jsx'
 import { WORLD_PRESETS, matchingPreset } from './mapgen.js'
-
-function Group({ title, children }) {
-  return (
-    <div className="flex flex-col gap-4 rounded-md border border-neutral-800 bg-neutral-900 p-4 sm:gap-5 sm:p-5">
-      <p className="text-xs font-bold tracking-[0.14em] text-emerald-400 uppercase">{title}</p>
-      {children}
-    </div>
-  )
-}
 
 /** The four worlds worth having as one tap. Size and island count are one
  *  decision, not two: a 64-tile map has nowhere to put a second island, and a

@@ -827,7 +827,7 @@ function drawFoxes(ctx, map, sim, tilePx, ox, oy, startX, startY, endX, endY) {
     const cy = baseY - pose.lift * r * 0.25
     const facing = renderFacing(fox)
     const selected = sim.selectedKind === 'fox' && fox.id === sim.selectedId
-    const stats = foxStats(fox.genes)
+    const stats = foxStats(fox.genes, sim.rules.fox)
 
     // The ring shrinks when it steps under the canopy: forest costs a fox
     // 45% of its sight (see FOREST_VISION_FACTOR), and watching the circle

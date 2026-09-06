@@ -26,6 +26,12 @@ export const WEIGHT_CLAMP = 4
 const MUTATION_RATE = 0.15
 const MUTATION_STDDEV = 0.35
 
+/** The pair as one object: the "how fast does evolution happen" dial the
+ * player can move before a run (see ./scenario.js, which scales it into
+ * `sim.rules.brain`), and the default mutateNet falls back to. Still one
+ * setting for both species, for the reason above. */
+export const NET_BASE = { mutation: { rate: MUTATION_RATE, stddev: MUTATION_STDDEV } }
+
 function randWeight(rng) {
   return (rng() * 2 - 1) * WEIGHT_RANGE
 }
@@ -99,21 +105,21 @@ export function sigmoid(x) {
   return 1 / (1 + Math.exp(-x))
 }
 
-function mutateArray(src, rng) {
+function mutateArray(src, rng, { rate, stddev }) {
   const out = new Float32Array(src.length)
   for (let i = 0; i < src.length; i++) {
-    out[i] = rng() < MUTATION_RATE ? clamp(src[i] + gaussian(rng) * MUTATION_STDDEV, -WEIGHT_CLAMP, WEIGHT_CLAMP) : src[i]
+    out[i] = rng() < rate ? clamp(src[i] + gaussian(rng) * stddev, -WEIGHT_CLAMP, WEIGHT_CLAMP) : src[i]
   }
   return out
 }
 
 /** A child net: `net`'s weights, each independently mutated with probability
- * MUTATION_RATE. Never mutates the parent in place. */
-export function mutateNet(net, rng) {
+ * `mutation.rate`. Never mutates the parent in place. */
+export function mutateNet(net, rng, mutation = NET_BASE.mutation) {
   return {
-    w1: mutateArray(net.w1, rng),
-    b1: mutateArray(net.b1, rng),
-    w2: mutateArray(net.w2, rng),
-    b2: mutateArray(net.b2, rng),
+    w1: mutateArray(net.w1, rng, mutation),
+    b1: mutateArray(net.b1, rng, mutation),
+    w2: mutateArray(net.w2, rng, mutation),
+    b2: mutateArray(net.b2, rng, mutation),
   }
 }

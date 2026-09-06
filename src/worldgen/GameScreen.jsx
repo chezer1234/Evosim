@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { drawMap } from './mapgen.js'
 import {
   createSimulation,
@@ -13,9 +13,10 @@ import {
 } from '../sim/simulation.js'
 import { drawSimulation } from '../sim/render.js'
 import { computeTraits, describeEnergyEffects, describeTraits } from '../sim/brainInsight.js'
-import { foxStats } from '../sim/fox.js'
+import { describeFoxStats, foxStats } from '../sim/fox.js'
 import { computeFoxTraits, describeFoxBrain, describeFoxDrives } from '../sim/foxInsight.js'
 import { describeRabbitSenses } from '../sim/rabbit.js'
+import { SCENARIO_PRESETS, matchingScenarioPreset } from '../sim/scenario.js'
 import { isWaterType } from './mapgen.js'
 import RabbitInsights from './RabbitInsights.jsx'
 import FoxInsights from './FoxInsights.jsx'
@@ -121,6 +122,10 @@ function buildInsightsData(sim) {
         alive: fox.alive,
         genes: fox.genes,
         brain: fox.brain,
+        // Read against this run's rules, not the baseline: "needs a rabbit
+        // every ~180s to break even" is a different sentence on an island
+        // where the player doubled fox upkeep (see sim/scenario.js).
+        statNotes: describeFoxStats(fox.genes, sim.rules.fox),
         traits,
         blurb: describeFoxBrain(traits),
         drives: describeFoxDrives(traits),
@@ -158,12 +163,12 @@ function buildInsightsData(sim) {
     sheltered: rabbits.filter((r) => r.burrowId != null).length,
     // Counted across both species: "how much of what is alive out there can
     // get into the water" is the number that moves as the gene spreads.
-    swimmers: rabbits.filter((r) => r.senses.canSwim).length + foxes.filter((f) => foxStats(f.genes).canSwim).length,
+    swimmers: rabbits.filter((r) => r.senses.canSwim).length + foxes.filter((f) => foxStats(f.genes, sim.rules.fox).canSwim).length,
     // And the far rarer number: how much of it could leave the island it is
     // standing on (see OPEN_WATER_MIN_SKILL in sim/water.js).
     seafarers:
       rabbits.filter((r) => r.senses.canCrossOpenWater).length +
-      foxes.filter((f) => foxStats(f.genes).canCrossOpenWater).length,
+      foxes.filter((f) => foxStats(f.genes, sim.rules.fox).canCrossOpenWater).length,
     islands: spread.islands.length,
     colonised: spread.colonised,
     atSea: spread.atSea,
@@ -289,7 +294,7 @@ const HINT_CLASS = {
   side: `${HINT_PILL} left-2`,
 }
 
-export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
+export default function GameScreen({ map, scenario, onBack, onNewMap, onOpenSettings, onOpenScenario }) {
   const canvasRef = useRef(null)
   const wrapRef = useRef(null)
   const viewRef = useRef({ tilePx: 1, originX: 0, originY: 0, minTilePx: 1, maxTilePx: 1 })
@@ -362,8 +367,17 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
   const [expandedChart, setExpandedChart] = useState(null)
   const wasPausedBeforeExpandRef = useRef(false)
 
+  // What the population panel calls this world. Named presets say what they
+  // are; anything hand-tuned is "Custom"; the default scenario says nothing
+  // at all, because a run nobody changed needs no label.
+  const scenarioLabel = useMemo(() => {
+    const key = matchingScenarioPreset(scenario ?? {})
+    if (key === 'balanced') return null
+    return SCENARIO_PRESETS.find((preset) => preset.key === key)?.label ?? 'Custom'
+  }, [scenario])
+
   useEffect(() => {
-    simRef.current = map ? createSimulation(map) : null
+    simRef.current = map ? createSimulation(map, scenario ?? {}) : null
     lastReportedCountsRef.current = { rabbits: 0, foxes: 0, fish: 0, crabs: 0, kills: 0 }
     setCounts({ rabbits: 0, foxes: 0, fish: 0, crabs: 0, kills: 0 })
     setInsightsData(null)
@@ -371,7 +385,9 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
     setPaused(false)
     setExpandedChart(null)
     wasPausedBeforeExpandRef.current = false
-  }, [map])
+    // Both, not just the map: App hands over a fresh map and the scenario it
+    // was played with together, and a run is the pair of them.
+  }, [map, scenario])
 
   const setSpawnOpen = useCallback((open) => {
     spawnRef.current = { ...spawnRef.current, open }
@@ -900,6 +916,9 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
           <button type="button" onClick={onOpenSettings} aria-label="Settings" className={TOUCH_ICON}>
             ⚙
           </button>
+          <button type="button" onClick={onOpenScenario} aria-label="Scenario" className={TOUCH_ICON}>
+            🧬
+          </button>
           <div className="ml-auto flex items-center gap-3 overflow-x-auto text-xs whitespace-nowrap text-neutral-400">
             {stats}
           </div>
@@ -915,6 +934,12 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
             </button>
             <button type="button" onClick={onOpenSettings} className={TOOLBAR_BUTTON}>
               ⚙ Settings
+            </button>
+            {/* Editing these does nothing to the run in progress - a
+                scenario is fixed when you press play - so the button says
+                what it is for by sitting next to "New map". */}
+            <button type="button" onClick={onOpenScenario} className={TOOLBAR_BUTTON}>
+              🧬 Scenario
             </button>
             {map ? (
               <button type="button" onClick={toggleSpawnPalette} className={spawn.open ? TOOLBAR_BUTTON_ON : TOOLBAR_BUTTON}>
@@ -1029,6 +1054,7 @@ export default function GameScreen({ map, onBack, onNewMap, onOpenSettings }) {
               drownings={insightsData?.drownings ?? 0}
               history={insightsData?.history ?? []}
               generationRange={insightsData?.generationRange ?? null}
+              scenarioLabel={scenarioLabel}
               foxGenerationRange={insightsData?.foxGenerationRange ?? null}
               mapInfo={
                 compact && map

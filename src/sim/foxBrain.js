@@ -23,7 +23,7 @@
 // the fox net decides *what to do* and simulation.js works out which way
 // that points.
 
-import { createNet, forward, mutateNet, sigmoid } from './net.js'
+import { NET_BASE, createNet, forward, mutateNet, sigmoid } from './net.js'
 
 // What a fox knows on a decision tick. Prey is what it can see (its vision
 // gene, halved under forest canopy); scent is the long, vague sense that
@@ -79,18 +79,33 @@ const REST_INITIAL_BIAS = 1.4
 // worth the walk can still evolve straight back off it.
 const FORAGE_INITIAL_BIAS = 1.8
 
-const INITIAL_BIAS = {
-  [CHASE_OUTPUT]: CHASE_INITIAL_BIAS,
-  [SPRINT_OUTPUT]: SPRINT_INITIAL_BIAS,
-  [TRACK_OUTPUT]: TRACK_INITIAL_BIAS,
-  [REST_OUTPUT]: REST_INITIAL_BIAS,
-  [BREED_OUTPUT]: BREED_INITIAL_BIAS,
-  [FORAGE_OUTPUT]: FORAGE_INITIAL_BIAS,
+/** The six priors as named settings: what the player is choosing when they
+ * set how readily the first foxes chase, track or lie up (see ./scenario.js,
+ * which passes them back in as `sim.rules.fox.bias`), and the default
+ * createFoxBrain falls back to. */
+export const FOX_BRAIN_BASE = {
+  bias: {
+    chase: CHASE_INITIAL_BIAS,
+    sprint: SPRINT_INITIAL_BIAS,
+    track: TRACK_INITIAL_BIAS,
+    rest: REST_INITIAL_BIAS,
+    breed: BREED_INITIAL_BIAS,
+    forage: FORAGE_INITIAL_BIAS,
+  },
 }
 
-/** A fresh fox brain, using `rng` (a 0..1 generator). */
-export function createFoxBrain(rng) {
-  return createNet(FOX_BRAIN_SHAPE, rng, INITIAL_BIAS)
+/** A fresh fox brain, using `rng` (a 0..1 generator) and the run's fox rules
+ * (`sim.rules.fox`); only its founder biases are read here. */
+export function createFoxBrain(rng, rules = FOX_BRAIN_BASE) {
+  const { chase, sprint, track, rest, breed, forage } = rules.bias
+  return createNet(FOX_BRAIN_SHAPE, rng, {
+    [CHASE_OUTPUT]: chase,
+    [SPRINT_OUTPUT]: sprint,
+    [TRACK_OUTPUT]: track,
+    [REST_OUTPUT]: rest,
+    [BREED_OUTPUT]: breed,
+    [FORAGE_OUTPUT]: forage,
+  })
 }
 
 /**
@@ -124,7 +139,8 @@ export function foxThink(brain, inputs) {
   }
 }
 
-/** A cub's brain: the parent's, mutated by the same rules as a rabbit's. */
-export function mutateFoxBrain(brain, rng) {
-  return mutateNet(brain, rng)
+/** A cub's brain: the parent's, mutated by the same rules as a rabbit's -
+ * literally the same, `sim.rules.brain`, which is the point. */
+export function mutateFoxBrain(brain, rng, rules = NET_BASE) {
+  return mutateNet(brain, rng, rules.mutation)
 }
